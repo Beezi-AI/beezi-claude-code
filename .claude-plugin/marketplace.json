@@ -1,0 +1,16 @@
+{
+  "name": "beezi",
+  "owner": { "name": "Beezi" },
+  "description": "Beezi's Claude Code plugin marketplace.",
+  "plugins": [
+    {
+      "name": "beezi",
+      "source": "./beezi-analytics-plugin",
+      "description": "Reports Claude Code session token analytics for Beezi task branches.",
+      "version": "0.1.0",
+      "author": { "name": "Beezi" },
+      "keywords": ["analytics", "token-usage", "beezi", "telemetry"],
+      "category": "analytics"
+    }
+  ]
+}
