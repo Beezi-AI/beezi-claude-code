@@ -4,6 +4,18 @@ import { computeCodeChanges } from './code-changes.mjs';
 
 const IDLE_GAP_SEC = 300;
 
+// Pull display text out of an assistant message (string content or text blocks).
+function messageText(message) {
+  const c = message?.content;
+  if (typeof c === 'string') return c.trim() || null;
+  if (Array.isArray(c)) {
+    const text = c.filter((b) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text).join('\n').trim();
+    return text || null;
+  }
+  return null;
+}
+
 // Attribute each new transcript line to (repoRoot, branch): repo from tool-path signals,
 // branch from the injected branchAt (per-repo reflog in production). Split the window into
 // contiguous same-(repo, branch) runs; each maximal run is one segment with a disjoint
@@ -50,6 +62,7 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
 
   const countedMessages = new Set();
   const segments = [];
+  const rateLimitEvents = [];
   let run = null;
   let activeRoot = cwd != null ? repoRootOf(cwd) : null;
 
@@ -89,6 +102,14 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
     run.lines.push(line);
     if (ms != null) run.timestamps.push(ms);
 
+    if (line.isApiErrorMessage === true && (line.error === 'rate_limit' || line.apiErrorStatus === 429)) {
+      rateLimitEvents.push({
+        text: messageText(line.message),
+        occurredAt: line.timestamp ?? null,
+        lineNo,
+      });
+    }
+
     if (line.type === 'assistant' && line.message?.usage) {
       if (id && countedMessages.has(id)) continue;
       if (id) countedMessages.add(id);
@@ -108,7 +129,7 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
     }
   }
   closeRun();
-  return { nextCursor: Math.max(fromLine, raw.length), segments };
+  return { nextCursor: Math.max(fromLine, raw.length), segments, rateLimitEvents };
 }
 
 function summarize(models, timestamps, lines) {

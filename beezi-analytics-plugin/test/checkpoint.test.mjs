@@ -695,3 +695,34 @@ test('18. realistic multi-line messages across two windows attribute per repo (C
   assert.equal(captured[1].token_total, 100);
   assert.notEqual(captured[0].segmentId, captured[1].segmentId, 'disjoint segmentIds across windows');
 });
+
+test('reports rate-limit events to /sessions/errors', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const file = writeTranscript(dir, [
+    assistantLine('main', 'claude-opus-4-8', { input_tokens: 1, output_tokens: 1 }, '2026-07-08T10:00:00.000Z', '/some/path'),
+  ]);
+
+  const calls = [];
+  const fetchImpl = async (url, opts) => { calls.push({ url, opts }); return { status: 200 }; };
+  const computeDelta = () => ({
+    nextCursor: 1,
+    segments: [],
+    rateLimitEvents: [
+      { text: "You've hit your session limit · resets 4:30pm (Europe/Kiev)", occurredAt: '2026-07-08T10:00:00.000Z', lineNo: 1 },
+    ],
+  });
+
+  await runCheckpoint(
+    { session_id: 's1', transcript_path: file, cwd: '/some/path' },
+    { getToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'git@github.com:acme/app.git'), computeDelta, fetchImpl },
+  );
+
+  const errorCalls = calls.filter((c) => /\/sessions\/errors$/.test(c.url));
+  assert.equal(errorCalls.length, 1);
+  const body = JSON.parse(errorCalls[0].opts.body);
+  assert.equal(body.sessionId, 's1');
+  assert.equal(body.error, 'rate_limit');
+  assert.match(body.lastAssistantMessage, /resets 4:30pm/);
+  assert.equal(body.occurredAt, '2026-07-08T10:00:00.000Z');
+});

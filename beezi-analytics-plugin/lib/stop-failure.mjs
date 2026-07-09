@@ -1,7 +1,6 @@
 import fs from 'node:fs';
-import { apiBase, ENDPOINTS } from './config.mjs';
-import { postJson } from './http.mjs';
 import { getToken } from './credentials.mjs';
+import { postSessionError } from './session-error-report.mjs';
 
 // Best-effort: pull the last assistant message text and any API-error detail from the
 // transcript tail. The StopFailure error_type is the reliable signal; these are extra context.
@@ -83,11 +82,5 @@ export async function reportSessionError(input, deps = {}) {
     lastAssistantMessage,
     occurredAt: now().toISOString(),
   };
-
-  try {
-    const res = await postJson(`${apiBase()}${ENDPOINTS.sessionErrors}`, token, payload, { fetchImpl });
-    return { reported: res.status >= 200 && res.status < 300, status: res.status };
-  } catch {
-    return { reported: false, reason: 'network' };
-  }
+  return postSessionError(payload, token, { fetchImpl });
 }

@@ -621,3 +621,42 @@ test('P8. trailing newline does not overshoot the cursor; boundary line processe
   assert.equal(second.segments.length, 1, 'the appended line is processed, not skipped');
   assert.equal(second.segments[0].stats.token_input, 20, 'boundary line counted exactly once');
 });
+
+test('collects rate-limit events from the window', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-rl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const file = writeFixture(dir, [
+    assistantLine('main', 'claude-opus-4-8', {
+      input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2026-07-08T09:59:00.000Z'),
+    {
+      type: 'assistant',
+      model: '<synthetic>',
+      timestamp: '2026-07-08T10:00:00.000Z',
+      isApiErrorMessage: true,
+      error: 'rate_limit',
+      apiErrorStatus: 429,
+      message: { content: [{ type: 'text', text: "You've hit your session limit · resets 4:30pm (Europe/Kiev)" }] },
+    },
+  ]);
+
+  const { rateLimitEvents } = computeDelta(file, 0, { cwd: '/some/path', repoRootOf: (d) => d });
+
+  assert.equal(rateLimitEvents.length, 1);
+  assert.match(rateLimitEvents[0].text, /resets 4:30pm \(Europe\/Kiev\)/);
+  assert.equal(rateLimitEvents[0].occurredAt, '2026-07-08T10:00:00.000Z');
+  assert.equal(rateLimitEvents[0].lineNo, 2);
+});
+
+test('no rate-limit events in a clean window', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-clean-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+  const file = writeFixture(dir, [
+    assistantLine('main', 'claude-opus-4-8', {
+      input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2026-07-08T09:59:00.000Z'),
+  ]);
+  const { rateLimitEvents } = computeDelta(file, 0, { cwd: '/some/path', repoRootOf: (d) => d });
+  assert.equal(rateLimitEvents.length, 0);
+});

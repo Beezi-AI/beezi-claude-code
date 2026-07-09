@@ -8,6 +8,7 @@ import { readCheckoutEvents, buildBranchTimeline, branchAt as branchAtReflog } f
 import { resolveRepoRoot } from './repo-timeline.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
+import { postSessionError } from './session-error-report.mjs';
 import { detectBillingSource } from './billing.mjs';
 import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
 import { sessionNameFrom } from './session-name.mjs';
@@ -82,7 +83,7 @@ export async function runCheckpoint(input, deps = {}) {
   } catch {
     return { enqueued: 0, flush: null };
   }
-  const { nextCursor, segments } = delta;
+  const { nextCursor, segments, rateLimitEvents = [] } = delta;
 
   let enqueued = 0;
   for (const seg of segments) {
@@ -106,6 +107,22 @@ export async function runCheckpoint(input, deps = {}) {
       });
       enqueued += 1;
     } catch { /* keep going; the cursor still advances below */ }
+  }
+
+  // postSessionError swallows its own failures (never rejects), so a limit-report
+  // problem can't break the checkpoint — no wrapper needed.
+  for (const event of rateLimitEvents) {
+    await postSessionError(
+      {
+        sessionId: session_id,
+        error: 'rate_limit',
+        errorDetails: null,
+        lastAssistantMessage: event.text,
+        occurredAt: event.occurredAt ?? new Date().toISOString(),
+      },
+      token,
+      { fetchImpl },
+    );
   }
 
   if (nextCursor !== state.cursor) {
