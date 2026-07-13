@@ -1,9 +1,35 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { claudeSessionsDir } from './paths.mjs';
+import { readJson } from './fs-store.mjs';
 
 const MAX = 200;
 
-// Best-effort Claude Code session title: a `summary` line if present, else the first
-// user prompt (truncated), else null.
+// The live session name Claude Code shows in /status. It writes a per-process descriptor to
+// ~/.claude/sessions/<pid>.json holding { sessionId, name, ... }; the file is keyed by pid, so
+// we scan and match on sessionId. This name is user-facing and can change after the first prompt
+// (Claude Code renames the session), which is exactly what we want to surface in analytics.
+export function sessionNameFromStore(sessionId) {
+  if (!sessionId) return null;
+  const dir = claudeSessionsDir();
+  let files;
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const rec = readJson(path.join(dir, file));
+    if (!rec || rec.sessionId !== sessionId) continue;
+    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+    return name.slice(0, MAX) || null;
+  }
+  return null;
+}
+
+// Fallback title from the transcript: a `summary` line if present, else the first user prompt
+// (truncated), else null.
 export function sessionNameFrom(transcriptPath) {
   let content;
   try { content = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return null; }
@@ -25,4 +51,10 @@ export function sessionNameFrom(transcriptPath) {
     }
   }
   return firstUser;
+}
+
+// Session display name: prefer Claude Code's live session store (the /status name, which updates
+// after the first prompt), falling back to the transcript summary / first user prompt.
+export function resolveSessionName(sessionId, transcriptPath) {
+  return sessionNameFromStore(sessionId) ?? sessionNameFrom(transcriptPath);
 }

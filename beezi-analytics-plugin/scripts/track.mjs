@@ -11,7 +11,6 @@ function fail(message) {
 }
 
 async function main() {
-  // Branch fit is the primary check — fail fast, before any network work.
   let branch;
   try {
     branch = currentBranch(cwd);
@@ -19,10 +18,10 @@ async function main() {
     fail('Beezi: not a git repository — run this inside your project.');
   }
 
+  // Every branch is worth tracking: task branches attribute to their ticket, the rest to the
+  // repository. `taskFromBranch` only decides the label we echo, never whether we report.
   const task = taskFromBranch(branch);
-  if (!task) {
-    fail(`Beezi: branch "${branch}" is not a Beezi task branch (expected a .../task-… branch). Nothing tracked.`);
-  }
+  const label = task ?? branch;
 
   const token = await getToken().catch(() => null);
   if (!token) fail('Beezi: this machine is not linked. Run /beezi:login first.');
@@ -51,11 +50,11 @@ async function main() {
 
   const saved = flush?.flushed ?? 0;
   if (enqueued === 0 && saved === 0) {
-    console.log(`✓ Beezi: nothing new to save for ${task} — already up to date.`);
+    console.log(`✓ Beezi: nothing new to save for ${label} — already up to date.`);
     return;
   }
 
-  console.log(`✓ Beezi: analytics saved for ${task} (${saved} segment${saved === 1 ? '' : 's'}).`);
+  console.log(`✓ Beezi: analytics saved for ${label} (${saved} segment${saved === 1 ? '' : 's'}).`);
 }
 
 main().catch((error) => fail(error.message));

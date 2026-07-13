@@ -11,7 +11,7 @@ import { postJson } from './http.mjs';
 import { postSessionError } from './session-error-report.mjs';
 import { detectBillingSource } from './billing.mjs';
 import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
-import { sessionNameFrom } from './session-name.mjs';
+import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 
 function loadState(id) {
@@ -47,7 +47,7 @@ export async function runCheckpoint(input, deps = {}) {
   // Below the token gate: skip this work entirely on an unlinked machine.
   const billingSource = detectBillingSource();
   const subscriptionFields = subscriptionReportFields(billingSource, readBillingConfig());
-  const sessionName = sessionNameFrom(transcript_path);
+  const sessionName = resolveSessionName(session_id, transcript_path);
 
   // Memoized git shell-outs for this checkpoint: dir→root, root→remote, root→reflog/HEAD.
   const rootCache = new Map();

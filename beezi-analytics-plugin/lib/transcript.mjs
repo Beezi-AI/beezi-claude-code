@@ -1,10 +1,6 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-
-function projectsRoot() {
-  return path.join(os.homedir(), '.claude', 'projects');
-}
+import { claudeProjectsDir } from './paths.mjs';
 
 // Claude Code stores transcripts under a per-project dir named from the cwd with
 // every non-alphanumeric character replaced by '-'.
@@ -58,7 +54,7 @@ function transcriptMatchesCwd(file, cwd) {
 // Locate the current session's transcript for `cwd`.
 // Returns { sessionId, transcriptPath } or null.
 export function findCurrentTranscript(cwd) {
-  const root = projectsRoot();
+  const root = claudeProjectsDir();
 
   const primary = newestJsonl(path.join(root, encodeCwd(cwd)));
   if (primary) return { sessionId: primary.sessionId, transcriptPath: primary.full };

@@ -20,3 +20,17 @@ export function credentialsFile() {
 export function billingConfigFile() {
   return path.join(beeziHome(), 'billing.json');
 }
+
+// Claude Code's config root — `~/.claude`, relocatable via CLAUDE_CONFIG_DIR. Single source
+// for the dirs the plugin reads out of Claude Code (transcripts, live session store).
+export function claudeHome() {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+export function claudeProjectsDir() {
+  return path.join(claudeHome(), 'projects');
+}
+
+export function claudeSessionsDir() {
+  return path.join(claudeHome(), 'sessions');
+}

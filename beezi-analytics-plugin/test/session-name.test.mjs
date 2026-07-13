@@ -3,12 +3,31 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sessionNameFrom } from '../lib/session-name.mjs';
+import { sessionNameFrom, sessionNameFromStore, resolveSessionName } from '../lib/session-name.mjs';
 
 function makeTmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sn-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true }));
   return dir;
+}
+
+// A temp CLAUDE_CONFIG_DIR with a sessions/ store, restored after the test.
+function makeClaudeHome(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-home-'));
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  t.after(() => {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
+
+function writeSession(home, pid, record) {
+  const sdir = path.join(home, 'sessions');
+  fs.mkdirSync(sdir, { recursive: true });
+  fs.writeFileSync(path.join(sdir, `${pid}.json`), JSON.stringify(record), 'utf-8');
 }
 
 function writeTranscript(dir, lines) {
@@ -73,4 +92,51 @@ test('sessionNameFrom — skips malformed JSON lines and blank lines', (t) => {
     JSON.stringify({ type: 'user', message: { content: 'good prompt' } }),
   ].join('\n'), 'utf-8');
   assert.equal(sessionNameFrom(p), 'good prompt');
+});
+
+test('sessionNameFromStore — returns the live session name matched by sessionId', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 111, { sessionId: 'other', name: 'wrong' });
+  writeSession(home, 222, { sessionId: 'abc-123', name: 'analytics-session-truncate-fix' });
+  assert.equal(sessionNameFromStore('abc-123'), 'analytics-session-truncate-fix');
+});
+
+test('sessionNameFromStore — trims and truncates to 200 chars', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 's', name: `  ${'x'.repeat(500)}  ` });
+  assert.equal(sessionNameFromStore('s').length, 200);
+});
+
+test('sessionNameFromStore — null when the matched record has no usable name', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 's', name: '   ' });
+  writeSession(home, 2, { sessionId: 's2' });
+  assert.equal(sessionNameFromStore('s'), null);
+  assert.equal(sessionNameFromStore('s2'), null);
+});
+
+test('sessionNameFromStore — null when no record matches / dir missing', (t) => {
+  const home = makeClaudeHome(t);
+  assert.equal(sessionNameFromStore('nope'), null, 'sessions dir absent → null');
+  writeSession(home, 1, { sessionId: 's', name: 'x' });
+  assert.equal(sessionNameFromStore('missing'), null, 'no matching sessionId → null');
+  assert.equal(sessionNameFromStore(''), null, 'empty sessionId → null');
+});
+
+test('resolveSessionName — store name wins over the transcript summary', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 'sid', name: 'the-real-name' });
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [{ type: 'summary', summary: 'Transcript summary' }]);
+  assert.equal(resolveSessionName('sid', p), 'the-real-name');
+});
+
+test('resolveSessionName — falls back to transcript when the store has no match', (t) => {
+  makeClaudeHome(t); // empty store
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'user', message: { content: 'first prompt' } },
+    { type: 'summary', summary: 'Summary title' },
+  ]);
+  assert.equal(resolveSessionName('sid', p), 'Summary title');
 });
