@@ -90,7 +90,7 @@ must upsert on it, since overlapping hooks can deliver the same segment twice.
 ### Install
 
 ```
-/plugin marketplace add <github-username>/<repo-name>
+/plugin marketplace add https://github.com/Beezi-AI/beezi-claude-code
 /plugin install beezi@beezi
 ```
 
