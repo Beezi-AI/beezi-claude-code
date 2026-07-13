@@ -22,29 +22,77 @@ export function sessionNameFromStore(sessionId) {
     if (!file.endsWith('.json')) continue;
     const rec = readJson(path.join(dir, file));
     if (!rec || rec.sessionId !== sessionId) continue;
+    // nameSource "derived" is a placeholder Claude Code builds from the cwd folder name
+    // (e.g. "my-repo-64") before a real title exists — not a session name. Skip the record
+    // rather than bail: a stale descriptor from a dead pid can share the sessionId with the
+    // live one that holds the real name.
+    if (rec.nameSource === 'derived') continue;
     const name = typeof rec.name === 'string' ? rec.name.trim() : '';
     return name.slice(0, MAX) || null;
   }
   return null;
 }
 
-// Fallback title from the transcript. Preference order: the AI-generated title Claude Code
-// writes (`ai-title`, re-emitted as work progresses — the last one is current), else a
-// `summary` line, else the first user prompt (truncated), else null.
+// Titles are appended to the transcript (latest wins), so like Claude Code itself we avoid
+// parsing the whole file: raw-scan only a bounded head/tail chunk for the key.
+const SCAN_CHUNK = 64 * 1024;
+
+function lastTitleIn(chunk, key) {
+  const re = new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`, 'g');
+  const values = [];
+  let m;
+  while ((m = re.exec(chunk)) !== null) values.push(m[1]);
+  for (let i = values.length - 1; i >= 0; i--) {
+    try {
+      const v = JSON.parse(`"${values[i]}"`).trim();
+      if (v) return v.slice(0, MAX);
+    } catch { /* escape split at a chunk boundary; try an earlier occurrence */ }
+  }
+  return null;
+}
+
+// First and last SCAN_CHUNK bytes of the file ({ head, tail } are the same string when the
+// file fits in one chunk). null when the file can't be read.
+function readChunks(transcriptPath) {
+  let fd;
+  try { fd = fs.openSync(transcriptPath, 'r'); } catch { return null; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const headBuf = Buffer.alloc(Math.min(size, SCAN_CHUNK));
+    fs.readSync(fd, headBuf, 0, headBuf.length, 0);
+    const head = headBuf.toString('utf-8');
+    if (size <= SCAN_CHUNK) return { head, tail: head };
+    const tailBuf = Buffer.alloc(SCAN_CHUNK);
+    fs.readSync(fd, tailBuf, 0, SCAN_CHUNK, size - SCAN_CHUNK);
+    return { head, tail: tailBuf.toString('utf-8') };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+// Fallback title from the transcript, mirroring Claude Code's own precedence: `custom-title`
+// (written by /rename and --name) beats `ai-title` (regenerated as work progresses); both are
+// latest-wins, so the tail chunk is scanned before the head. Else a `summary` line, else the
+// first user prompt (truncated), else null.
 export function sessionNameFrom(transcriptPath) {
-  let content;
-  try { content = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return null; }
-  let aiTitle = null;
+  const chunks = readChunks(transcriptPath);
+  if (!chunks) return null;
+  const { head, tail } = chunks;
+  const scan = (key) => lastTitleIn(tail, key) ?? (tail === head ? null : lastTitleIn(head, key));
+  const title = scan('customTitle') ?? scan('aiTitle');
+  if (title) return title;
+
+  // The summary line and first prompt live near the start of the transcript.
   let summary = null;
   let firstUser = null;
-  for (const raw of content.split('\n')) {
+  for (const raw of head.split('\n')) {
     if (!raw.trim()) continue;
     let line;
     try { line = JSON.parse(raw); } catch { continue; }
-    if (line.type === 'ai-title' && typeof line.aiTitle === 'string' && line.aiTitle.trim()) {
-      aiTitle = line.aiTitle.trim().slice(0, MAX); // keep the latest; Claude Code updates it
-    } else if (!summary && line.type === 'summary' && typeof line.summary === 'string') {
-      summary = line.summary.slice(0, MAX);
+    if (!summary && line.type === 'summary' && typeof line.summary === 'string') {
+      summary = line.summary.trim().slice(0, MAX) || null;
     } else if (!firstUser && line.type === 'user') {
       const text = typeof line.message?.content === 'string'
         ? line.message.content
@@ -54,11 +102,12 @@ export function sessionNameFrom(transcriptPath) {
       if (text.trim()) firstUser = text.trim().slice(0, MAX);
     }
   }
-  return aiTitle ?? summary ?? firstUser;
+  return summary ?? firstUser;
 }
 
-// Session display name: prefer Claude Code's live session store (the /status name, which updates
-// after the first prompt), falling back to the transcript's ai-title / summary / first user prompt.
+// Session display name: prefer Claude Code's live session store (real names only — the derived
+// placeholder is skipped), falling back to the transcript's custom-title / ai-title / summary /
+// first user prompt.
 export function resolveSessionName(sessionId, transcriptPath) {
   return sessionNameFromStore(sessionId) ?? sessionNameFrom(transcriptPath);
 }

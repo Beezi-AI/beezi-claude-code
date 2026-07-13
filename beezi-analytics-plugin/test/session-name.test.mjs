@@ -36,6 +36,84 @@ function writeTranscript(dir, lines) {
   return p;
 }
 
+test('sessionNameFrom — ai-title beats summary and first user prompt', (t) => {
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'user', message: { content: 'first prompt' } },
+    { type: 'summary', summary: 'Summary title' },
+    { type: 'ai-title', aiTitle: 'AI generated title' },
+  ]);
+  assert.equal(sessionNameFrom(p), 'AI generated title');
+});
+
+test('sessionNameFrom — last ai-title wins', (t) => {
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'ai-title', aiTitle: 'Old title' },
+    { type: 'user', message: { content: 'a prompt' } },
+    { type: 'ai-title', aiTitle: 'Current title' },
+  ]);
+  assert.equal(sessionNameFrom(p), 'Current title');
+});
+
+test('sessionNameFrom — custom-title (rename) beats ai-title regardless of position', (t) => {
+  const dir = makeTmpDir(t);
+  const customFirst = writeTranscript(dir, [
+    { type: 'custom-title', customTitle: 'My renamed session' },
+    { type: 'ai-title', aiTitle: 'AI title' },
+  ]);
+  const customLast = writeTranscript(dir, [
+    { type: 'ai-title', aiTitle: 'AI title' },
+    { type: 'custom-title', customTitle: 'My renamed session' },
+  ]);
+  assert.equal(sessionNameFrom(customFirst), 'My renamed session');
+  assert.equal(sessionNameFrom(customLast), 'My renamed session');
+});
+
+test('sessionNameFrom — last custom-title wins', (t) => {
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'custom-title', customTitle: 'First rename' },
+    { type: 'custom-title', customTitle: 'Second rename' },
+  ]);
+  assert.equal(sessionNameFrom(p), 'Second rename');
+});
+
+test('sessionNameFrom — finds ai-title in the tail of a >64KB transcript', (t) => {
+  const dir = makeTmpDir(t);
+  const filler = Array.from({ length: 150 }, () => (
+    { type: 'assistant', message: { content: 'x'.repeat(1000) } }
+  ));
+  const p = writeTranscript(dir, [
+    { type: 'user', message: { content: 'first prompt' } },
+    ...filler,
+    { type: 'ai-title', aiTitle: 'Title near the end' },
+  ]);
+  assert.equal(sessionNameFrom(p), 'Title near the end');
+});
+
+test('sessionNameFrom — finds custom-title in the head of a >64KB transcript', (t) => {
+  const dir = makeTmpDir(t);
+  const filler = Array.from({ length: 150 }, () => (
+    { type: 'assistant', message: { content: 'x'.repeat(1000) } }
+  ));
+  const p = writeTranscript(dir, [
+    { type: 'custom-title', customTitle: 'Named at start' },
+    { type: 'user', message: { content: 'first prompt' } },
+    ...filler,
+  ]);
+  assert.equal(sessionNameFrom(p), 'Named at start');
+});
+
+test('sessionNameFrom — empty summary line does not block the first-user fallback', (t) => {
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'summary', summary: '' },
+    { type: 'user', message: { content: 'the actual prompt' } },
+  ]);
+  assert.equal(sessionNameFrom(p), 'the actual prompt');
+});
+
 test('sessionNameFrom — prefers the summary line', (t) => {
   const dir = makeTmpDir(t);
   const p = writeTranscript(dir, [
@@ -115,6 +193,31 @@ test('sessionNameFromStore — null when the matched record has no usable name',
   assert.equal(sessionNameFromStore('s2'), null);
 });
 
+test('sessionNameFromStore — ignores placeholder names (nameSource "derived")', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 's', name: 'my-repo-64', nameSource: 'derived' });
+  assert.equal(sessionNameFromStore('s'), null);
+});
+
+test('sessionNameFromStore — keeps real names (nameSource "user"/"ai"/absent)', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 'u', name: 'renamed by user', nameSource: 'user' });
+  writeSession(home, 2, { sessionId: 'a', name: 'ai title', nameSource: 'ai' });
+  writeSession(home, 3, { sessionId: 'n', name: 'no source field' });
+  assert.equal(sessionNameFromStore('u'), 'renamed by user');
+  assert.equal(sessionNameFromStore('a'), 'ai title');
+  assert.equal(sessionNameFromStore('n'), 'no source field');
+});
+
+test('sessionNameFromStore — a stale derived record does not mask a real one for the same sessionId', (t) => {
+  const home = makeClaudeHome(t);
+  // readdirSync yields '1.json' before '2.json'; the derived record must be skipped,
+  // not abort the scan.
+  writeSession(home, 1, { sessionId: 's', name: 'my-repo-64', nameSource: 'derived' });
+  writeSession(home, 2, { sessionId: 's', name: 'Real live name' });
+  assert.equal(sessionNameFromStore('s'), 'Real live name');
+});
+
 test('sessionNameFromStore — null when no record matches / dir missing', (t) => {
   const home = makeClaudeHome(t);
   assert.equal(sessionNameFromStore('nope'), null, 'sessions dir absent → null');
@@ -129,6 +232,28 @@ test('resolveSessionName — store name wins over the transcript summary', (t) =
   const dir = makeTmpDir(t);
   const p = writeTranscript(dir, [{ type: 'summary', summary: 'Transcript summary' }]);
   assert.equal(resolveSessionName('sid', p), 'the-real-name');
+});
+
+test('resolveSessionName — derived store placeholder loses to the transcript ai-title', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 'sid', name: 'beezi-claude-code-46', nameSource: 'derived' });
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'user', message: { content: 'first prompt' } },
+    { type: 'ai-title', aiTitle: 'Fix session name resolution' },
+  ]);
+  assert.equal(resolveSessionName('sid', p), 'Fix session name resolution');
+});
+
+test('resolveSessionName — derived store placeholder loses to the transcript custom-title', (t) => {
+  const home = makeClaudeHome(t);
+  writeSession(home, 1, { sessionId: 'sid', name: 'beezi-claude-code-46', nameSource: 'derived' });
+  const dir = makeTmpDir(t);
+  const p = writeTranscript(dir, [
+    { type: 'ai-title', aiTitle: 'AI title' },
+    { type: 'custom-title', customTitle: 'Renamed mid-session' },
+  ]);
+  assert.equal(resolveSessionName('sid', p), 'Renamed mid-session');
 });
 
 test('resolveSessionName — falls back to transcript when the store has no match', (t) => {
