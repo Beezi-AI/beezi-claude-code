@@ -822,3 +822,37 @@ test('19. rename (summary) with no new segment re-sends the anchor with the corr
   await runCheckpoint({ session_id: 'sess-19', transcript_path: filePath, cwd: dir }, deps);
   assert.equal(captured.length, 2, 'no extra re-send when the name is unchanged');
 });
+
+// ─── session name: fall back to the previously-sent name when unreadable ─────
+
+test('unreadable session name falls back to the previously-sent name', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  // Isolate the live session store so sessionNameFromStore can't match a real session → null.
+  const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = path.join(dir, 'claude-empty');
+  t.after(() => { process.env.CLAUDE_CONFIG_DIR = prevCfg; });
+
+  // Seed prior state: we already sent a name on an earlier checkpoint.
+  fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'state', 'sess-name.json'),
+    JSON.stringify({ cursor: 0, sentSessionName: 'Fix login bug', anchor: null }),
+    'utf-8',
+  );
+
+  // A billable segment whose transcript yields no name (no user/summary/ai-title line).
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2026-07-13T10:00:00.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-name', transcript_path: transcript, cwd: dir },
+    { getToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  const items = readQueue(dir);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].payload.session_name, 'Fix login bug', 'payload keeps the previous name');
+  assert.equal(readState(dir, 'sess-name').sentSessionName, 'Fix login bug', 'state name not clobbered to null');
+});

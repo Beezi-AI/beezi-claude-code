@@ -47,7 +47,7 @@ export async function runCheckpoint(input, deps = {}) {
   // Below the token gate: skip this work entirely on an unlinked machine.
   const billingSource = detectBillingSource();
   const subscriptionFields = subscriptionReportFields(billingSource, readBillingConfig());
-  const sessionName = resolveSessionName(session_id, transcript_path);
+  const resolvedSessionName = resolveSessionName(session_id, transcript_path);
 
   // Memoized git shell-outs for this checkpoint: dir→root, root→remote, root→reflog/HEAD.
   const rootCache = new Map();
@@ -81,6 +81,9 @@ export async function runCheckpoint(input, deps = {}) {
   };
 
   const state = loadState(session_id);
+  // When the session file is unreadable (name resolves to null), keep the last name we sent
+  // rather than overwriting the stored name with null.
+  const sessionName = resolvedSessionName ?? state.sentSessionName ?? null;
   let delta;
   try {
     delta = computeDelta(transcript_path, state.cursor, { cwd, repoRootOf, branchAt: branchOf });
