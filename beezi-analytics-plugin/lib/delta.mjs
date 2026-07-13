@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { extractPathSignal } from './repo-timeline.mjs';
 import { computeCodeChanges } from './code-changes.mjs';
+import { computeOperations } from './operations.mjs';
 
 const IDLE_GAP_SEC = 300;
 
@@ -150,6 +151,7 @@ function summarize(models, timestamps, lines) {
     ...totals,
     duration_sec: Math.round(activeMs / 1000),
     code_changes: computeCodeChanges(lines),
+    operations: computeOperations(lines),
     started_at: timestamps.length ? new Date(timestamps[0]).toISOString() : null,
     ended_at: timestamps.length ? new Date(timestamps[timestamps.length - 1]).toISOString() : null,
   };

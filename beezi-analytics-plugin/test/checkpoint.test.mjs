@@ -726,3 +726,99 @@ test('reports rate-limit events to /sessions/errors', async (t) => {
   assert.match(body.lastAssistantMessage, /resets 4:30pm/);
   assert.equal(body.occurredAt, '2026-07-08T10:00:00.000Z');
 });
+
+// ─── operations: per-category breakdown survives to the wire ─────────────────
+
+test('per-category operations reach the enqueued payload', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    {
+      type: 'assistant',
+      gitBranch: 'main',
+      timestamp: '2026-07-08T10:00:00.000Z',
+      message: {
+        model: 'model-a',
+        usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [
+          { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/x/a.ts' } },
+          { type: 'tool_use', id: 't2', name: 'Grep', input: { pattern: 'x' } },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      gitBranch: 'main',
+      timestamp: '2026-07-08T10:00:01.000Z',
+      message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'y'.repeat(80) }] },
+    },
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-ops', transcript_path: transcript, cwd: dir },
+    { getToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  const items = readQueue(dir);
+  assert.equal(items.length, 1);
+  const { operations } = items[0].payload;
+  assert.ok(operations, 'operations present on payload');
+  assert.equal(operations.file.count, 1);
+  assert.equal(operations.file.est_tokens, 20); // 80 bytes / 4
+  assert.equal(operations.search.count, 1);
+  assert.equal(operations.other.count, 0);
+});
+
+// ─── session rename after first prompt is re-sent via the anchor segment ──────
+
+function userLine(branch, text, timestamp) {
+  return { type: 'user', gitBranch: branch, timestamp, message: { content: text } };
+}
+
+test('19. rename (summary) with no new segment re-sends the anchor with the corrected name', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const filePath = path.join(dir, 'transcript.jsonl');
+  fs.writeFileSync(
+    filePath,
+    [
+      userLine('feature/task-1', 'fix login bug', '2024-01-01T10:00:00.000Z'),
+      assistantLine('feature/task-1', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:01.000Z'),
+    ].map((l) => JSON.stringify(l)).join('\n'),
+    'utf-8',
+  );
+
+  const captured = [];
+  const deps = {
+    getToken: async () => 'tok',
+    gitImpl: fakeGitRepo('feature/task-1', 'https://host/org/repo.git'),
+    fetchImpl: async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 200 }; },
+  };
+
+  // First checkpoint: no summary yet → name falls back to the first user prompt.
+  await runCheckpoint({ session_id: 'sess-19', transcript_path: filePath, cwd: dir }, deps);
+  assert.equal(captured.length, 1, 'first checkpoint enqueues the segment');
+  assert.equal(captured[0].session_name, 'fix login bug', 'segment carries the first-prompt name');
+  const anchorSegmentId = captured[0].segmentId;
+
+  const stateAfterFirst = readState(dir, 'sess-19');
+  assert.equal(stateAfterFirst.sentSessionName, 'fix login bug', 'sent name recorded');
+  assert.ok(stateAfterFirst.anchor, 'anchor payload stored');
+
+  // Claude Code writes the generated title; no further billable activity.
+  fs.appendFileSync(filePath, '\n' + JSON.stringify({ type: 'summary', summary: 'Fix login bug' }), 'utf-8');
+
+  // Second checkpoint: no new segment, but the name changed → replay the anchor.
+  await runCheckpoint({ session_id: 'sess-19', transcript_path: filePath, cwd: dir }, deps);
+  assert.equal(captured.length, 2, 'rename triggers exactly one re-send');
+  assert.equal(captured[1].segmentId, anchorSegmentId, 're-send reuses the anchor segmentId (idempotent)');
+  assert.equal(captured[1].session_name, 'Fix login bug', 're-send carries the corrected title');
+  assert.equal(captured[1].token_total, captured[0].token_total, 'same tokens — no double count');
+  assert.equal(readState(dir, 'sess-19').sentSessionName, 'Fix login bug', 'sent name updated');
+
+  // Third checkpoint: name unchanged → no further re-send (no spam).
+  await runCheckpoint({ session_id: 'sess-19', transcript_path: filePath, cwd: dir }, deps);
+  assert.equal(captured.length, 2, 'no extra re-send when the name is unchanged');
+});

@@ -15,7 +15,11 @@ import { sessionNameFrom } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 
 function loadState(id) {
-  return readJson(path.join(stateDir(), `${id}.json`), { cursor: 0 });
+  return readJson(path.join(stateDir(), `${id}.json`), {
+    cursor: 0,
+    sentSessionName: null,
+    anchor: null,
+  });
 }
 
 function saveState(id, state) {
@@ -86,6 +90,8 @@ export async function runCheckpoint(input, deps = {}) {
   const { nextCursor, segments, rateLimitEvents = [] } = delta;
 
   let enqueued = 0;
+  // The last enqueued payload becomes the "anchor" we can replay to push a later rename.
+  let lastPayload = null;
   for (const seg of segments) {
     if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
     const remote = resolveRemote(seg.repoRoot);
@@ -93,7 +99,7 @@ export async function runCheckpoint(input, deps = {}) {
     // A single write failure must not abort the window (which would leave the cursor
     // unadvanced and re-process everything forever) — skip that segment and continue.
     try {
-      enqueue({
+      const payload = {
         segmentId: `${session_id}:${seg.fromLine}-${seg.toLine}`,
         sessionId: session_id,
         remote,
@@ -104,7 +110,9 @@ export async function runCheckpoint(input, deps = {}) {
         ...subscriptionFields,
         session_name: sessionName,
         ...seg.stats,
-      });
+      };
+      enqueue(payload);
+      lastPayload = payload;
       enqueued += 1;
     } catch { /* keep going; the cursor still advances below */ }
   }
@@ -125,8 +133,31 @@ export async function runCheckpoint(input, deps = {}) {
     );
   }
 
+  let stateDirty = false;
+
+  // Claude Code renames a session after the first prompt. The new name normally rides on the
+  // next billable segment (each report re-reads it), but a session whose rename lands with no
+  // further activity would keep the first-prompt title forever. So: remember the anchor segment
+  // and the name we last sent; when the name changes but no new segment carried it, replay the
+  // anchor with the corrected name. The server upserts by segmentId (idempotent tokens/cost) and
+  // takes the latest non-null session_name, so this only fixes the name.
+  if (enqueued > 0) {
+    state.anchor = lastPayload;
+    state.sentSessionName = sessionName;
+    stateDirty = true;
+  } else if (sessionName != null && sessionName !== state.sentSessionName && state.anchor) {
+    try {
+      enqueue({ ...state.anchor, session_name: sessionName });
+      state.sentSessionName = sessionName;
+      stateDirty = true;
+    } catch { /* best-effort; retry next checkpoint */ }
+  }
+
   if (nextCursor !== state.cursor) {
     state.cursor = nextCursor;
+    stateDirty = true;
+  }
+  if (stateDirty) {
     try { saveState(session_id, state); } catch { /* best-effort */ }
   }
 
