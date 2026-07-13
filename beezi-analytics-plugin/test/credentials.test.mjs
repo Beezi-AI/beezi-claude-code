@@ -48,14 +48,26 @@ function secretToolRun(store, installed) {
   };
 }
 
-// DPAPI faked as reversible base64 so enc/dec round-trips.
-function powershellRun(works) {
+// Fakes the two Windows PowerShell paths: the Credential Manager P/Invoke (CredWrite/Read/
+// Delete) and the DPAPI fallback (Protect/Unprotect, modeled as reversible base64). Toggle
+// each independently to exercise the backend chain: credMan → DPAPI-file → plaintext-file.
+function winRun({ credMan = true, dpapi = true } = {}) {
+  const credStore = new Map(); // stands in for the OS Credential Manager
   return (file, args, input) => {
     // The backend invokes PowerShell by absolute path; match on the basename.
     if (path.basename(String(file)).toLowerCase() !== 'powershell.exe') return { ok: false, stdout: '' };
-    if (!works) return { ok: false, stdout: '' };
     const script = args[args.indexOf('-Command') + 1];
-    // Note: 'Unprotect'.includes('Protect') is true — check Unprotect FIRST.
+    // Credential Manager (primary). CredWrite/CredRead/CredDelete are disjoint substrings.
+    if (script.includes('CredWrite')) {
+      if (!credMan) return { ok: false, stdout: '' };
+      credStore.set('k', input); return { ok: true, stdout: 'OK\n' };
+    }
+    if (script.includes('CredDelete')) { credStore.delete('k'); return { ok: true, stdout: '' }; }
+    if (script.includes('CredRead')) {
+      return credMan && credStore.has('k') ? { ok: true, stdout: credStore.get('k') } : { ok: false, stdout: '' };
+    }
+    // DPAPI fallback. Note: 'Unprotect'.includes('Protect') is true — check Unprotect FIRST.
+    if (!dpapi) return { ok: false, stdout: '' };
     if (script.includes('Unprotect')) return { ok: true, stdout: Buffer.from(input.trim(), 'base64').toString('utf-8') + '\n' };
     if (script.includes('Protect')) return { ok: true, stdout: Buffer.from(input, 'utf-8').toString('base64') + '\n' };
     return { ok: true, stdout: '' };
@@ -97,9 +109,20 @@ test('Linux — no secret-tool → falls back to the 0600 file', async (t) => {
 
 // ── Windows ─────────────────────────────────────────────────────────────────────
 
-test('Windows — DPAPI encrypts at rest (no plaintext token in the file)', async (t) => {
+test('Windows — Credential Manager round-trip (primary); nothing written to disk', async (t) => {
   const dir = tmpHome(t);
-  const deps = { platform: 'win32', run: powershellRun(true) };
+  const deps = { platform: 'win32', run: winRun() };
+  const where = await setToken('win-cred', deps);
+  assert.equal(where, 'the Windows Credential Manager');
+  assert.equal(fs.existsSync(credsPath(dir)), false, 'Credential Manager used, no file');
+  assert.equal(await getToken(deps), 'win-cred');
+  await deleteToken(deps);
+  assert.equal(await getToken(deps), null);
+});
+
+test('Windows — Credential Manager unavailable → DPAPI encrypts at rest (no plaintext in file)', async (t) => {
+  const dir = tmpHome(t);
+  const deps = { platform: 'win32', run: winRun({ credMan: false, dpapi: true }) };
   await setToken('win-tok', deps);
   const raw = fs.readFileSync(credsPath(dir), 'utf-8');
   const obj = JSON.parse(raw);
@@ -109,12 +132,20 @@ test('Windows — DPAPI encrypts at rest (no plaintext token in the file)', asyn
   assert.equal(await getToken(deps), 'win-tok', 'decrypts on read');
 });
 
-test('Windows — DPAPI unavailable → plaintext 0600 file fallback', async (t) => {
+test('Windows — Credential Manager + DPAPI unavailable → plaintext 0600 file fallback', async (t) => {
   const dir = tmpHome(t);
-  const deps = { platform: 'win32', run: powershellRun(false) };
+  const deps = { platform: 'win32', run: winRun({ credMan: false, dpapi: false }) };
   await setToken('win-plain', deps);
   assert.equal(JSON.parse(fs.readFileSync(credsPath(dir), 'utf-8')).token, 'win-plain');
   assert.equal(await getToken(deps), 'win-plain');
+});
+
+test('Windows — legacy DPAPI-file token still read when Credential Manager is empty', async (t) => {
+  tmpHome(t);
+  // Simulate a user who linked before the Credential Manager backend existed: token lives in
+  // the DPAPI file only. A later session (credMan present but empty) must still find it.
+  await setToken('legacy-dpapi', { platform: 'win32', run: winRun({ credMan: false, dpapi: true }) });
+  assert.equal(await getToken({ platform: 'win32', run: winRun({ credMan: true, dpapi: true }) }), 'legacy-dpapi');
 });
 
 // ── cross-cutting ────────────────────────────────────────────────────────────────

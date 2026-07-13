@@ -91,8 +91,12 @@ function secretToolBackend(run) {
   };
 }
 
-// Windows Credential Manager can store but not return a secret from the CLI, so we use
-// DPAPI (user-bound OS crypto) via PowerShell and keep the ciphertext in the 0600 file.
+// Windows: the primary store is the Credential Manager, reached via a P/Invoke to advapi32
+// (CredWrite/CredRead/CredDelete) — the token then appears under Control Panel → Credential
+// Manager → Windows Credentials, keyed by SERVICE. The `cmdkey` CLI can *store* but not read
+// a secret back, so we call the Win32 API directly through PowerShell. Should that ever fail
+// (locked-down box, PowerShell missing) we fall back to DPAPI (user-bound OS crypto) with the
+// ciphertext kept in the 0600 file, and finally to a plaintext 0600 file.
 const DPAPI_ENC = "$in=[Console]::In.ReadToEnd();Add-Type -AssemblyName System.Security;"
   + "$b=[Text.Encoding]::UTF8.GetBytes($in);"
   + "$e=[Security.Cryptography.ProtectedData]::Protect($b,$null,'CurrentUser');"
@@ -104,6 +108,87 @@ const DPAPI_DEC = "$in=[Console]::In.ReadToEnd().Trim();Add-Type -AssemblyName S
 
 function powershell(run, script, input) {
   return run(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', script], input);
+}
+
+// ── Windows Credential Manager via advapi32 P/Invoke (the primary Windows store) ──
+// The CREDENTIAL struct is shared by the read and write scripts. CharSet=Unicode marshals
+// TargetName/UserName as wide strings; the secret blob is written/read as UTF-16 so it
+// round-trips any character (verified against '&', '=', '.').
+const CRED_STRUCT = `
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+public struct CREDENTIAL {
+  public uint Flags; public uint Type;
+  public string TargetName; public string Comment;
+  public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+  public uint CredentialBlobSize; public IntPtr CredentialBlob;
+  public uint Persist; public uint AttributeCount; public IntPtr Attributes;
+  public string TargetAlias; public string UserName;
+}`;
+
+// Reads the secret from stdin (never an argv element, so it can't leak via the process list),
+// writes a GENERIC credential with LOCAL_MACHINE persistence, prints 'OK' on success.
+const CRED_WRITE = `$in=[Console]::In.ReadToEnd()
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class BeeziCredW {
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool CredWrite([In] ref CREDENTIAL c, uint flags);${CRED_STRUCT}
+}
+"@
+$bytes=[Text.Encoding]::Unicode.GetBytes($in)
+$blob=[Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+[Runtime.InteropServices.Marshal]::Copy($bytes,0,$blob,$bytes.Length)
+$c=New-Object BeeziCredW+CREDENTIAL
+$c.Type=1; $c.TargetName='${SERVICE}'; $c.UserName='${ACCOUNT}'
+$c.CredentialBlob=$blob; $c.CredentialBlobSize=$bytes.Length; $c.Persist=2
+$ok=[BeeziCredW]::CredWrite([ref]$c,0)
+[Runtime.InteropServices.Marshal]::FreeHGlobal($blob)
+if($ok){'OK'}else{exit 1}`;
+
+// Reads the GENERIC credential back and writes the plaintext secret to stdout; exits non-zero
+// when the target is absent (fresh machine, or token stored by the DPAPI fallback instead).
+const CRED_READ = `Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class BeeziCredR {
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool CredRead(string target, uint type, uint flags, out IntPtr cred);
+  [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr cred);${CRED_STRUCT}
+}
+"@
+$ptr=[IntPtr]::Zero
+if(-not [BeeziCredR]::CredRead('${SERVICE}',1,0,[ref]$ptr)){exit 1}
+$cred=[Runtime.InteropServices.Marshal]::PtrToStructure($ptr,[Type][BeeziCredR+CREDENTIAL])
+$size=$cred.CredentialBlobSize
+if($size -gt 0){
+  $bytes=New-Object byte[] $size
+  [Runtime.InteropServices.Marshal]::Copy($cred.CredentialBlob,$bytes,0,$size)
+  [Console]::Out.Write([Text.Encoding]::Unicode.GetString($bytes))
+}
+[BeeziCredR]::CredFree($ptr)`;
+
+const CRED_DELETE = `Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class BeeziCredD {
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool CredDelete(string target, uint type, uint flags);
+}
+"@
+[void][BeeziCredD]::CredDelete('${SERVICE}',1,0)`;
+
+function credManBackend(run) {
+  return {
+    available: () => true, // advapi32 + PowerShell ship with Windows; failures fall through
+    get() {
+      return tokenFrom(powershell(run, CRED_READ));
+    },
+    set(token) {
+      const r = powershell(run, CRED_WRITE, token);
+      return r.ok && r.stdout.trim() === 'OK' ? 'the Windows Credential Manager' : false;
+    },
+    delete() {
+      powershell(run, CRED_DELETE);
+    },
+  };
 }
 
 function dpapiFileBackend(run) {
@@ -144,7 +229,7 @@ function backends(deps) {
   const file = fileBackend();
   if (platform === 'darwin') return [macBackend(run), file];
   if (platform === 'linux') return [secretToolBackend(run), file];
-  if (platform === 'win32') return [dpapiFileBackend(run), file];
+  if (platform === 'win32') return [credManBackend(run), dpapiFileBackend(run), file];
   return [file];
 }
 

@@ -22,9 +22,16 @@ function openBrowser(url) {
   try {
     if (process.platform === 'win32') {
       const sysRoot = process.env.SystemRoot || 'C:\\Windows';
-      // explorer takes the URL as a literal arg (no shell parsing); absolute path avoids
-      // resolving a bare name against the current directory.
-      execFileSync(path.join(sysRoot, 'explorer.exe'), [url], { stdio: 'ignore' });
+      // Start-Process uses ShellExecute → the default browser's http(s) association, and
+      // handles query strings (?code=…&…) correctly. explorer.exe mis-parses such URLs and
+      // can pop a File Explorer / search window instead of the browser. Absolute PowerShell
+      // path avoids resolving a bare name against the current directory; the URL is passed
+      // as an env var, never spliced into the command text, so it can't be run as script.
+      const powershell = path.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process $env:BEEZI_LOGIN_URL'], {
+        stdio: 'ignore',
+        env: { ...process.env, BEEZI_LOGIN_URL: url },
+      });
     } else if (process.platform === 'darwin') {
       execFileSync('/usr/bin/open', [url], { stdio: 'ignore' });
     } else {
