@@ -28,20 +28,24 @@ export function sessionNameFromStore(sessionId) {
   return null;
 }
 
-// Fallback title from the transcript: a `summary` line if present, else the first user prompt
-// (truncated), else null.
+// Fallback title from the transcript. Preference order: the AI-generated title Claude Code
+// writes (`ai-title`, re-emitted as work progresses — the last one is current), else a
+// `summary` line, else the first user prompt (truncated), else null.
 export function sessionNameFrom(transcriptPath) {
   let content;
   try { content = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return null; }
+  let aiTitle = null;
+  let summary = null;
   let firstUser = null;
   for (const raw of content.split('\n')) {
     if (!raw.trim()) continue;
     let line;
     try { line = JSON.parse(raw); } catch { continue; }
-    if (line.type === 'summary' && typeof line.summary === 'string') {
-      return line.summary.slice(0, MAX);
-    }
-    if (!firstUser && line.type === 'user') {
+    if (line.type === 'ai-title' && typeof line.aiTitle === 'string' && line.aiTitle.trim()) {
+      aiTitle = line.aiTitle.trim().slice(0, MAX); // keep the latest; Claude Code updates it
+    } else if (!summary && line.type === 'summary' && typeof line.summary === 'string') {
+      summary = line.summary.slice(0, MAX);
+    } else if (!firstUser && line.type === 'user') {
       const text = typeof line.message?.content === 'string'
         ? line.message.content
         : Array.isArray(line.message?.content)
@@ -50,11 +54,11 @@ export function sessionNameFrom(transcriptPath) {
       if (text.trim()) firstUser = text.trim().slice(0, MAX);
     }
   }
-  return firstUser;
+  return aiTitle ?? summary ?? firstUser;
 }
 
 // Session display name: prefer Claude Code's live session store (the /status name, which updates
-// after the first prompt), falling back to the transcript summary / first user prompt.
+// after the first prompt), falling back to the transcript's ai-title / summary / first user prompt.
 export function resolveSessionName(sessionId, transcriptPath) {
   return sessionNameFromStore(sessionId) ?? sessionNameFrom(transcriptPath);
 }
