@@ -13,6 +13,7 @@ import { detectBillingSource } from './billing.mjs';
 import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
+import { listSubagentTranscripts } from './subagents.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -95,29 +96,51 @@ export async function runCheckpoint(input, deps = {}) {
   let enqueued = 0;
   // The last enqueued payload becomes the "anchor" we can replay to push a later rename.
   let lastPayload = null;
-  for (const seg of segments) {
-    if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
-    const remote = resolveRemote(seg.repoRoot);
-    if (!remote) continue;
-    // A single write failure must not abort the window (which would leave the cursor
-    // unadvanced and re-process everything forever) — skip that segment and continue.
+  const enqueueSegments = (segs, segmentScope) => {
+    for (const seg of segs) {
+      if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
+      const remote = resolveRemote(seg.repoRoot);
+      if (!remote) continue;
+      // A single write failure must not abort the window (which would leave the cursor
+      // unadvanced and re-process everything forever) — skip that segment and continue.
+      try {
+        const payload = {
+          segmentId: `${segmentScope}:${seg.fromLine}-${seg.toLine}`,
+          sessionId: session_id,
+          remote,
+          branch: seg.branch,
+          from_line: seg.fromLine,
+          to_line: seg.toLine,
+          billing_source: billingSource,
+          ...subscriptionFields,
+          session_name: sessionName,
+          ...seg.stats,
+        };
+        enqueue(payload);
+        lastPayload = payload;
+        enqueued += 1;
+      } catch { /* keep going; the cursor still advances below */ }
+    }
+  };
+  enqueueSegments(segments, session_id);
+
+  // Subagent turns live in <transcriptDir>/<sessionId>/subagents/agent-*.jsonl and never
+  // appear in the main transcript, so each agent file gets its own delta window with its
+  // own cursor. Line numbers are per-file: scope the segmentId by agent id so they can't
+  // collide with main-transcript segments (or each other) on the server upsert.
+  const agentCursors = state.agentCursors ?? {};
+  let agentCursorsDirty = false;
+  for (const { agentId, path: agentPath } of listSubagentTranscripts(transcript_path, session_id)) {
+    const agentFrom = agentCursors[agentId] ?? 0;
+    let agentDelta;
     try {
-      const payload = {
-        segmentId: `${session_id}:${seg.fromLine}-${seg.toLine}`,
-        sessionId: session_id,
-        remote,
-        branch: seg.branch,
-        from_line: seg.fromLine,
-        to_line: seg.toLine,
-        billing_source: billingSource,
-        ...subscriptionFields,
-        session_name: sessionName,
-        ...seg.stats,
-      };
-      enqueue(payload);
-      lastPayload = payload;
-      enqueued += 1;
-    } catch { /* keep going; the cursor still advances below */ }
+      agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
+    } catch { continue; }
+    enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`);
+    if (agentDelta.nextCursor !== agentFrom) {
+      agentCursors[agentId] = agentDelta.nextCursor;
+      agentCursorsDirty = true;
+    }
   }
 
   // postSessionError swallows its own failures (never rejects), so a limit-report
@@ -158,6 +181,10 @@ export async function runCheckpoint(input, deps = {}) {
 
   if (nextCursor !== state.cursor) {
     state.cursor = nextCursor;
+    stateDirty = true;
+  }
+  if (agentCursorsDirty) {
+    state.agentCursors = agentCursors;
     stateDirty = true;
   }
   if (stateDirty) {
