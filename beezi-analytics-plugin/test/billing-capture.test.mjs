@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, buildConfig } from '../lib/billing-capture.mjs';
+import { parseArgs, buildConfig, shouldKeepExisting } from '../lib/billing-capture.mjs';
 
 test('parseArgs recognizes --from-claude as a boolean flag', () => {
   const a = parseArgs(['--from-claude', '--via', 'login']);
@@ -119,4 +119,35 @@ test('buildConfig — self-reported plan under api-key env nulls the plan fields
 test('buildConfig — auto-captured config has no selfReported key', () => {
   const cfg = buildConfig({ subscriptionType: 'pro', via: 'login' }, {}, new Date());
   assert.equal('selfReported' in cfg, false);
+});
+
+test('shouldKeepExisting — keeps a self-reported plan when fresh capture still resolves unknown', () => {
+  const fresh = { plan: 'unknown' };
+  const existing = { selfReported: true, plan: 'max_5x' };
+  assert.equal(shouldKeepExisting(fresh, existing), true);
+});
+
+test('shouldKeepExisting — overwrites when the fresh capture resolves a known plan', () => {
+  const fresh = { plan: 'pro' };
+  const existing = { selfReported: true, plan: 'max_5x' };
+  assert.equal(shouldKeepExisting(fresh, existing), false);
+});
+
+test('shouldKeepExisting — overwrites when the existing config is not self-reported', () => {
+  const fresh = { plan: 'unknown' };
+  const existing = { plan: 'pro' };
+  assert.equal(shouldKeepExisting(fresh, existing), false);
+});
+
+test('shouldKeepExisting — overwrites when there is no existing config', () => {
+  const fresh = { plan: 'unknown' };
+  assert.equal(shouldKeepExisting(fresh, null), false);
+  assert.equal(shouldKeepExisting(fresh, undefined), false);
+});
+
+test('shouldKeepExisting — overwrites when the existing plan is missing or unknown', () => {
+  const fresh = { plan: 'unknown' };
+  assert.equal(shouldKeepExisting(fresh, { selfReported: true, plan: 'unknown' }), false);
+  assert.equal(shouldKeepExisting(fresh, { selfReported: true, plan: null }), false);
+  assert.equal(shouldKeepExisting(fresh, { selfReported: true }), false);
 });

@@ -79,3 +79,13 @@ export function buildConfig(args, env = process.env, now = new Date()) {
     capturedBy: via,
   };
 }
+
+// A self-reported plan must survive automatic re-capture: when the fresh account
+// fields still normalize to 'unknown', overwriting would destroy the only good
+// data and restart the refresh-nudge loop the selfReported exemption exists to end.
+export function shouldKeepExisting(freshConfig, existingConfig) {
+  return freshConfig.plan === 'unknown'
+    && existingConfig?.selfReported === true
+    && Boolean(existingConfig.plan)
+    && existingConfig.plan !== 'unknown';
+}
