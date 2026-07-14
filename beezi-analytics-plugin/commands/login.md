@@ -11,8 +11,9 @@ Step 1 — get the code and open the browser (returns quickly):
 
 After step 1 finishes, show the user its full output — especially the
 `Verification code: XXXX-XXXX` line — so they can confirm it matches the code on
-the Beezi page. If that output says the machine is **already linked**, stop here
-and tell the user; do NOT run step 2.
+the Beezi page. If that output says the machine is **already linked**, tell the
+user and do NOT run step 2 — but still continue with step 3 below, so a user
+whose subscription tier changed can still refresh it.
 
 Step 2 — wait for approval and store the token (blocks until approved):
 
@@ -21,9 +22,9 @@ Step 2 — wait for approval and store the token (blocks until approved):
 Report success or the error message. The analytics token is never printed — do
 not echo it.
 
-Step 3 — capture the subscription plan for analytics (only if Step 2 linked
-successfully; skip if the machine was already linked). Run EXACTLY this one
-command, unmodified:
+Step 3 — capture the subscription plan for analytics (run this after a
+successful Step 2 link, OR when Step 1 reported the machine was already
+linked). Run EXACTLY this one command, unmodified:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --from-claude --via login`
 
