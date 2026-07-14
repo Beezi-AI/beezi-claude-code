@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runSessionStart, initCursorIfAbsent } from '../lib/session-start.mjs';
+import { runSessionStart } from '../lib/session-start.mjs';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -330,4 +330,34 @@ test('14. non-subscription billing source — no nudge even when isStale() would
   });
 
   assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
+});
+
+// ─── test 15: session cwd + transcript recorded in state (cwd-change recovery) ──
+
+test('15. records cwd + transcript_path in state; resume refreshes mapping without resetting cursor', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  await runSessionStart(
+    baseInput({ session_id: 'sess-map', cwd: '/launch/dir', transcript_path: '/projects/enc/sess-map.jsonl' }),
+    { getToken: async () => 'tok', fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
+  );
+
+  let state = readStateFile(dir, 'sess-map');
+  assert.equal(state.cursor, 0, 'fresh session starts at cursor 0');
+  assert.equal(state.cwd, '/launch/dir', 'launch cwd recorded');
+  assert.equal(state.transcriptPath, '/projects/enc/sess-map.jsonl', 'transcript path recorded');
+  assert.ok(state.updatedAt, 'updatedAt recorded');
+
+  // Resume from another directory: cursor preserved, mapping refreshed.
+  const stateDirPath = path.join(dir, 'state');
+  fs.writeFileSync(path.join(stateDirPath, 'sess-map.json'), JSON.stringify({ ...state, cursor: 42 }), 'utf-8');
+  await runSessionStart(
+    baseInput({ session_id: 'sess-map', cwd: '/resume/dir', transcript_path: '/projects/enc/sess-map.jsonl' }),
+    { getToken: async () => 'tok', fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
+  );
+
+  state = readStateFile(dir, 'sess-map');
+  assert.equal(state.cursor, 42, 'cursor NOT reset on resume');
+  assert.equal(state.cwd, '/resume/dir', 'mapping refreshed to the resume cwd');
 });

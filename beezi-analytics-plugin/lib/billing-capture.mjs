@@ -23,12 +23,43 @@ export function parseArgs(argv) {
     else if (flag === '--rate-limit-tier') out.rateLimitTier = argv[++i];
     else if (flag === '--expires-at') out.expiresAt = argv[++i];
     else if (flag === '--via') out.via = argv[++i];
+    else if (flag === '--plan') out.plan = argv[++i];
     else if (flag === '--from-claude') out.fromClaude = true;
+  }
+  // The script's --from-claude branch rebuilds args from ~/.claude.json, which would
+  // silently drop a user-supplied --plan; refuse the combination up front instead.
+  if (out.fromClaude && out.plan != null) {
+    throw new Error('--plan and --from-claude are mutually exclusive.');
   }
   return out;
 }
 
+// Self-reported plans a user can pick in the /beezi:login fallback. `free` is
+// absent: Claude Code cannot run on subscription billing with a free plan.
+const SELF_REPORTED_PLANS = Object.freeze(['pro', 'max_5x', 'max_20x', 'team', 'enterprise']);
+
 export function buildConfig(args, env = process.env, now = new Date()) {
+  if (args.plan != null) {
+    const plan = String(args.plan).trim().toLowerCase();
+    if (!SELF_REPORTED_PLANS.includes(plan)) {
+      throw new Error(`Unknown plan '${args.plan}'. Valid: ${SELF_REPORTED_PLANS.join(', ')}.`);
+    }
+    const source = detectBillingSource(env);
+    const isSub = source === BillingSource.SUBSCRIPTION;
+    return {
+      version: 1,
+      source,
+      // The plan label is the single source of the derived fields; the tier was
+      // never observed, so rateLimitTier stays null rather than a synthesized value.
+      subscriptionType: isSub ? (plan.startsWith('max_') ? 'max' : plan) : null,
+      rateLimitTier: null,
+      plan: isSub ? plan : null,
+      credentialsExpiresAt: null,
+      capturedAt: now.toISOString(),
+      capturedBy: safeField(args.via) ?? 'manual',
+      selfReported: true,
+    };
+  }
   const subscriptionType = safeField(args.subscriptionType);
   const rateLimitTier = safeField(args.rateLimitTier);
   const via = safeField(args.via) ?? 'manual';
@@ -47,4 +78,14 @@ export function buildConfig(args, env = process.env, now = new Date()) {
     capturedAt: now.toISOString(),
     capturedBy: via,
   };
+}
+
+// A self-reported plan must survive automatic re-capture: when the fresh account
+// fields still normalize to 'unknown', overwriting would destroy the only good
+// data and restart the refresh-nudge loop the selfReported exemption exists to end.
+export function shouldKeepExisting(freshConfig, existingConfig) {
+  return freshConfig.plan === 'unknown'
+    && existingConfig?.selfReported === true
+    && Boolean(existingConfig.plan)
+    && existingConfig.plan !== 'unknown';
 }

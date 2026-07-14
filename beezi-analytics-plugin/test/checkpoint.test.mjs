@@ -823,6 +823,121 @@ test('19. rename (summary) with no new segment re-sends the anchor with the corr
   assert.equal(captured.length, 2, 'no extra re-send when the name is unchanged');
 });
 
+// ─── subagent transcripts: usage in <sessionId>/subagents/agent-*.jsonl ──────
+
+// Claude Code writes each subagent's turns to <transcriptDir>/<sessionId>/subagents/
+// agent-<id>.jsonl — NOT to the main session transcript. These helpers build that layout.
+function writeSubagentTranscript(transcriptDir, sessionId, agentId, lines) {
+  const dir = path.join(transcriptDir, sessionId, 'subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${agentId}.jsonl`);
+  fs.writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n'), 'utf-8');
+  return p;
+}
+
+test('20. subagent transcript usage is enqueued as its own segment', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeSubagentTranscript(dir, 'sess-20', 'agent-abc123', [
+    assistantLine('main', 'claude-sonnet-5', { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-20', transcript_path: transcript, cwd: dir },
+    {
+      getToken: async () => 'tok',
+      gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+      fetchImpl: fakeFetch(503), // keep queue files so we can inspect them
+    },
+  );
+
+  const items = readQueue(dir);
+  assert.equal(items.length, 2, 'main segment + subagent segment');
+
+  const main = items.find(i => i.payload.segmentId === 'sess-20:1-1');
+  assert.ok(main, 'main segment keeps its segmentId shape');
+  assert.ok(main.payload.models['claude-fable-5'], 'main segment carries the main model');
+
+  const agent = items.find(i => i.payload.segmentId === 'sess-20:agent-abc123:1-1');
+  assert.ok(agent, 'subagent segment gets a distinct segmentId scoped by agent id');
+  assert.equal(agent.payload.sessionId, 'sess-20', 'subagent work bills to the parent session');
+  assert.equal(agent.payload.token_total, 280, 'subagent tokens counted (200+80)');
+  assert.ok(agent.payload.models['claude-sonnet-5'], 'subagent model reported');
+  assert.equal(agent.payload.branch, 'main');
+  assert.equal(agent.payload.remote, 'https://host/org/repo.git');
+});
+
+test('21. per-agent cursor — second run only processes new subagent lines', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ]);
+  const agentPath = writeSubagentTranscript(dir, 'sess-21', 'agent-abc123', [
+    assistantLine('main', 'claude-sonnet-5', { input_tokens: 100, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z'),
+  ]);
+
+  const captured = [];
+  const deps = {
+    getToken: async () => 'tok',
+    gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+    fetchImpl: async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 200 }; },
+  };
+
+  await runCheckpoint({ session_id: 'sess-21', transcript_path: transcript, cwd: dir }, deps);
+  assert.equal(captured.length, 2, 'first run: main + subagent segments');
+  assert.equal(readState(dir, 'sess-21').agentCursors['agent-abc123'], 1, 'agent cursor persisted');
+
+  // Only the subagent produces new lines before the next checkpoint.
+  const line2 = assistantLine('main', 'claude-sonnet-5', { input_tokens: 30, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:01:00.000Z');
+  fs.appendFileSync(agentPath, '\n' + JSON.stringify(line2), 'utf-8');
+
+  await runCheckpoint({ session_id: 'sess-21', transcript_path: transcript, cwd: dir }, deps);
+  assert.equal(captured.length, 3, 'second run: exactly one new segment (agent-only activity)');
+  const second = captured[2];
+  assert.equal(second.segmentId, 'sess-21:agent-abc123:2-2', 'new segment covers only the appended line');
+  assert.equal(second.token_total, 37, 'only the new line counted (30+7)');
+  assert.equal(readState(dir, 'sess-21').agentCursors['agent-abc123'], 2, 'agent cursor advanced');
+});
+
+// ─── session cwd/transcript recorded in state (cwd-change recovery) ──────────
+
+test('22. checkpoint records cwd + transcriptPath in session state, tracking cwd changes', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const filePath = path.join(dir, 'transcript.jsonl');
+  fs.writeFileSync(filePath, JSON.stringify(
+    assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ), 'utf-8');
+
+  const deps = {
+    getToken: async () => 'tok',
+    gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+    fetchImpl: fakeFetch(200),
+  };
+
+  await runCheckpoint({ session_id: 'sess-22', transcript_path: filePath, cwd: '/launch/dir' }, deps);
+  let state = readState(dir, 'sess-22');
+  assert.equal(state.cwd, '/launch/dir', 'launch cwd recorded');
+  assert.equal(state.transcriptPath, filePath, 'transcript path recorded');
+  assert.ok(state.updatedAt, 'updatedAt recorded');
+
+  // Session cd's elsewhere (worktree, subdir…) — next checkpoint carries the new cwd.
+  fs.appendFileSync(filePath, '\n' + JSON.stringify(
+    assistantLine('main', 'model-a', { input_tokens: 20, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:01:00.000Z'),
+  ), 'utf-8');
+  await runCheckpoint({ session_id: 'sess-22', transcript_path: filePath, cwd: '/launch/dir/.claude/worktrees/w1' }, deps);
+
+  state = readState(dir, 'sess-22');
+  assert.equal(state.cwd, '/launch/dir/.claude/worktrees/w1', 'cwd follows the session');
+});
+
 // ─── session name: fall back to the previously-sent name when unreadable ─────
 
 test('unreadable session name falls back to the previously-sent name', async (t) => {

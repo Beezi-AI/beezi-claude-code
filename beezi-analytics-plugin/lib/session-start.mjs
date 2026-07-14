@@ -4,6 +4,7 @@ import { getToken as _getToken, deleteToken as _deleteToken } from './credential
 import { flushQueue } from './checkpoint.mjs';
 import { git as _git, resolveOriginRemote } from './git.mjs';
 import { stateDir } from './paths.mjs';
+import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { whoami } from './whoami.mjs';
@@ -11,11 +12,18 @@ import { BillingSource, detectBillingSource as _detectBillingSource } from './bi
 import { readBillingConfig as _readBillingConfig, isStale as _isStale } from './billing-config.mjs';
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
-export function initCursorIfAbsent(sessionId) {
+// Also records where the session lives (cwd + transcript path) so /beezi:track can find
+// the transcript after the session cd's away from its launch directory — the mapping is
+// refreshed on every start (resume may happen from a different directory).
+export function initSessionState(sessionId, { cwd = null, transcriptPath = null } = {}) {
   const dir = stateDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const p = path.join(dir, `${sessionId}.json`);
-  if (!fs.existsSync(p)) fs.writeFileSync(p, JSON.stringify({ cursor: 0 }), { encoding: 'utf-8', mode: 0o600 });
+  const state = readJson(p, { cursor: 0 });
+  state.cwd = cwd;
+  state.transcriptPath = transcriptPath;
+  state.updatedAt = new Date().toISOString();
+  writeJsonSecure(p, state);
 }
 
 async function announceRepo(cwd, token, fetchImpl, gitImpl) {
@@ -62,7 +70,7 @@ export async function runSessionStart(input, deps = {}) {
     return '⚠ Beezi: this machine’s link was revoked — analytics are NOT being tracked. Run /beezi:login to re-link.';
   }
 
-  initCursorIfAbsent(input.session_id);
+  initSessionState(input.session_id, { cwd: input.cwd ?? null, transcriptPath: input.transcript_path ?? null });
   // Independent network I/O on the per-session hot path — flush queued checkpoints
   // and probe repo status concurrently rather than serially.
   const [, systemMessage] = await Promise.all([

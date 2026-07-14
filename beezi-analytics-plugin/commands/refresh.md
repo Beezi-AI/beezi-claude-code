@@ -11,4 +11,5 @@ do not read or inspect any files yourself:
 The script reads only the non-secret account info from `~/.claude.json` (never any
 token, never the credentials file) and stores the plan. Report its one-line output
 verbatim. If it says nothing was captured, tell the user their Claude subscription
-info was not found.
+info was not found. If the output says the self-reported plan was kept, report
+that verbatim to the user.

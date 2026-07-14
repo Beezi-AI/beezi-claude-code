@@ -1,5 +1,5 @@
-import { parseArgs, buildConfig } from '../lib/billing-capture.mjs';
-import { writeBillingConfig } from '../lib/billing-config.mjs';
+import { parseArgs, buildConfig, shouldKeepExisting } from '../lib/billing-capture.mjs';
+import { readBillingConfig, writeBillingConfig } from '../lib/billing-config.mjs';
 import { readClaudeAccount } from '../lib/claude-account.mjs';
 
 try {
@@ -23,6 +23,12 @@ try {
   }
 
   const config = buildConfig(args);
+
+  if (parsed.fromClaude && shouldKeepExisting(config, readBillingConfig())) {
+    console.log('Beezi: Claude account info still does not name a plan — keeping the self-reported plan.');
+    process.exit(0);
+  }
+
   writeBillingConfig(config);
   console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan ?? 'n/a'}.`);
 } catch (error) {

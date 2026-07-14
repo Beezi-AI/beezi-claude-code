@@ -68,3 +68,21 @@ test('subscriptionReportFields — populated for subscription, empty otherwise',
   assert.deepEqual(subscriptionReportFields('anthropic_api_key', cfg), {});
   assert.deepEqual(subscriptionReportFields('subscription', null), {});
 });
+
+test('isStale — self-reported plan never goes stale by age or credential expiry', () => {
+  const now = 1_000_000_000_000;
+  const old = {
+    source: 'subscription',
+    plan: 'max_20x',
+    selfReported: true,
+    credentialsExpiresAt: now - 1,
+    capturedAt: new Date(now - 400 * DAY).toISOString(),
+  };
+  assert.equal(isStale(old, now), false);
+});
+
+test('isStale — self-reported config with missing or unknown plan is still stale', () => {
+  const now = 1_000_000_000_000;
+  assert.equal(isStale({ source: 'subscription', selfReported: true, capturedAt: new Date(now).toISOString() }, now), true);
+  assert.equal(isStale({ source: 'subscription', plan: 'unknown', selfReported: true, capturedAt: new Date(now).toISOString() }, now), true);
+});

@@ -1,7 +1,7 @@
 import { getToken } from '../lib/credentials.mjs';
 import { runCheckpoint } from '../lib/checkpoint.mjs';
 import { git, resolveOriginRemote, currentBranch, taskFromBranch } from '../lib/git.mjs';
-import { findCurrentTranscript } from '../lib/transcript.mjs';
+import { resolveSessionTranscript } from '../lib/transcript.mjs';
 
 const cwd = process.cwd();
 
@@ -30,7 +30,7 @@ async function main() {
     fail('Beezi: this repo has no "origin" remote. Nothing tracked.');
   }
 
-  const transcript = findCurrentTranscript(cwd);
+  const transcript = resolveSessionTranscript(cwd);
   if (!transcript) {
     fail('Beezi: could not find this session’s transcript to track.');
   }
