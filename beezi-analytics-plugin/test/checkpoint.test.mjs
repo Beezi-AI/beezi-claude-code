@@ -905,6 +905,39 @@ test('21. per-agent cursor — second run only processes new subagent lines', as
   assert.equal(readState(dir, 'sess-21').agentCursors['agent-abc123'], 2, 'agent cursor advanced');
 });
 
+// ─── session cwd/transcript recorded in state (cwd-change recovery) ──────────
+
+test('22. checkpoint records cwd + transcriptPath in session state, tracking cwd changes', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const filePath = path.join(dir, 'transcript.jsonl');
+  fs.writeFileSync(filePath, JSON.stringify(
+    assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ), 'utf-8');
+
+  const deps = {
+    getToken: async () => 'tok',
+    gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+    fetchImpl: fakeFetch(200),
+  };
+
+  await runCheckpoint({ session_id: 'sess-22', transcript_path: filePath, cwd: '/launch/dir' }, deps);
+  let state = readState(dir, 'sess-22');
+  assert.equal(state.cwd, '/launch/dir', 'launch cwd recorded');
+  assert.equal(state.transcriptPath, filePath, 'transcript path recorded');
+  assert.ok(state.updatedAt, 'updatedAt recorded');
+
+  // Session cd's elsewhere (worktree, subdir…) — next checkpoint carries the new cwd.
+  fs.appendFileSync(filePath, '\n' + JSON.stringify(
+    assistantLine('main', 'model-a', { input_tokens: 20, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:01:00.000Z'),
+  ), 'utf-8');
+  await runCheckpoint({ session_id: 'sess-22', transcript_path: filePath, cwd: '/launch/dir/.claude/worktrees/w1' }, deps);
+
+  state = readState(dir, 'sess-22');
+  assert.equal(state.cwd, '/launch/dir/.claude/worktrees/w1', 'cwd follows the session');
+});
+
 // ─── session name: fall back to the previously-sent name when unreadable ─────
 
 test('unreadable session name falls back to the previously-sent name', async (t) => {

@@ -187,6 +187,16 @@ export async function runCheckpoint(input, deps = {}) {
     state.agentCursors = agentCursors;
     stateDirty = true;
   }
+  // Remember where this session lives. The session's cwd drifts (cd, worktree switches)
+  // while Claude Code keys the transcript dir by the LAUNCH cwd, so /beezi:track can't
+  // rely on process.cwd() to find the transcript — it reads this mapping instead. Only
+  // recorded once the transcript has content, so an empty session writes no state.
+  if (nextCursor > 0 && (state.cwd !== cwd || state.transcriptPath !== transcript_path)) {
+    state.cwd = cwd ?? null;
+    state.transcriptPath = transcript_path;
+    state.updatedAt = new Date().toISOString();
+    stateDirty = true;
+  }
   if (stateDirty) {
     try { saveState(session_id, state); } catch { /* best-effort */ }
   }

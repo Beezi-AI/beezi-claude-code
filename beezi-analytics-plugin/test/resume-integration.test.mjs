@@ -116,7 +116,7 @@ test('1. resume does NOT re-report already-counted work (no double count)', asyn
   // No segments should be flushed on resume (queue was already empty after first checkpoint's 200)
   assert.equal(payloadsFlush.length, 0, 'no segments flushed on resume (queue already empty)');
 
-  // Cursor must still be 2 — initCursorIfAbsent must not reset it
+  // Cursor must still be 2 — initSessionState must not reset it
   const stateAfterResume = readState(homeDir, session_id);
   assert.equal(stateAfterResume.cursor, 2, 'cursor must remain 2 after resume (not reset to 0)');
 
