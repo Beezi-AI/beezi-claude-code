@@ -16,6 +16,9 @@ export function writeBillingConfig(obj) {
 export function isStale(config, now = Date.now(), staleMs = STALE_MS) {
   if (!config || config.source !== BillingSource.SUBSCRIPTION) return false;
   if (!config.plan || config.plan === 'unknown') return true;
+  // A self-reported plan can never be re-resolved automatically, so age must not
+  // invalidate it; the user re-runs /beezi:login when their tier changes.
+  if (config.selfReported) return false;
   if (typeof config.credentialsExpiresAt === 'number' && config.credentialsExpiresAt <= now) return true;
   const capturedAt = Date.parse(config.capturedAt ?? '');
   if (Number.isNaN(capturedAt)) return true;
