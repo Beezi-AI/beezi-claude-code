@@ -28,5 +28,33 @@ command, unmodified:
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --from-claude --via login`
 
 It reads only the non-secret account info from `~/.claude.json`. Report its
-one-line summary. If it says nothing was captured, skip silently — the link itself
-already succeeded.
+one-line summary. If it could not resolve the plan, continue to Step 4.
+
+Step 4 — ask the user their tier (ONLY when Step 3 printed
+`no Claude subscription info found` or `plan=unknown`; skip this step
+entirely when Step 3 printed a known plan, or when its output shows
+`source=anthropic_api_key` or `source=third_party` — those machines do not
+bill a subscription, so a tier question does not apply).
+
+Ask with the AskUserQuestion tool: "Which Claude subscription do you have?"
+with exactly these options: "Pro", "Max 5x", "Max 20x", "Team or Enterprise".
+If they pick "Team or Enterprise", ask one follow-up question with options
+"Team" and "Enterprise".
+
+Map the final answer through this table — no other values are valid:
+
+| Answer     | value        |
+| ---------- | ------------ |
+| Pro        | `pro`        |
+| Max 5x     | `max_5x`     |
+| Max 20x    | `max_20x`    |
+| Team       | `team`       |
+| Enterprise | `enterprise` |
+
+Then run EXACTLY this command, substituting only `<value>`:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --plan <value> --via login-user`
+
+Report its one-line summary. If the user dismisses the question or answers
+something not in the table, skip the capture — the link itself already
+succeeded, say so.
