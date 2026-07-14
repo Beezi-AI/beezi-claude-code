@@ -1,6 +1,6 @@
 ---
 description: Link this machine to Beezi analytics (browser device flow)
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
 Do NOT read, open, or inspect any files yourself. Run only the given commands.
