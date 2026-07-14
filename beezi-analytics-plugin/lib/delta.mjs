@@ -3,7 +3,9 @@ import { extractPathSignal } from './repo-timeline.mjs';
 import { computeCodeChanges } from './code-changes.mjs';
 import { computeOperations } from './operations.mjs';
 
-const IDLE_GAP_SEC = 300;
+// Gaps longer than this between two activity lines count as idle, not active time. Exported so the
+// session-timeline derivation classifies "working" against the exact same threshold.
+export const IDLE_GAP_SEC = 300;
 
 // Pull display text out of an assistant message (string content or text blocks).
 function messageText(message) {

@@ -8,6 +8,7 @@ export function apiBase() {
 export const ENDPOINTS = Object.freeze({
   sessionsReport: "/sessions/report",
   sessionErrors: "/sessions/errors",
+  sessionsTimeline: "/sessions/timeline",
   reposStatus: "/repos/status",
   whoami: "/me/claude-code/whoami",
   deviceStart: "/auth/device/start",

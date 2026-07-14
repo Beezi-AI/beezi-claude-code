@@ -9,6 +9,7 @@ import { resolveRepoRoot } from './repo-timeline.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { postSessionError } from './session-error-report.mjs';
+import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { detectBillingSource } from './billing.mjs';
 import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
@@ -34,8 +35,10 @@ function enqueue(payload) {
   writeJsonSecure(path.join(queueDir(), filename), payload);
 }
 
+// `deps` holds substitutable implementations (test seams); `options` holds caller-driven execution
+// modes. Keeping them separate stops a behavior flag from masquerading as an injectable.
 // Returns { enqueued, flush } — flush is the flushQueue summary (or null when it never ran).
-export async function runCheckpoint(input, deps = {}) {
+export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
   const getToken = deps.getToken ?? _getToken;
   const gitImpl = deps.gitImpl ?? git;
@@ -177,6 +180,32 @@ export async function runCheckpoint(input, deps = {}) {
   }
 
   let stateDirty = false;
+
+  // The activity timeline is whole-session, so it's re-derived from the full transcript and shipped
+  // only at turn-ends (Stop / SessionEnd) — not on the frequent PostToolUse:Bash path. Skip the POST
+  // when the derived content is identical to the last one we sent (a Stop with no new activity), so
+  // we don't re-upsert the same growing jsonb every turn. Best-effort: a failure must never break the
+  // checkpoint.
+  if (options.emitTimeline) {
+    try {
+      const timeline = computeSessionTimeline(transcript_path, session_id);
+      if (timeline && (timeline.periods.length > 0 || timeline.subagents.length > 0)) {
+        const sig = `${JSON.stringify(timeline.periods)}|${JSON.stringify(timeline.subagents)}`;
+        if (sig !== state.sentTimelineSig) {
+          const { reported } = await postSessionTimeline(
+            { sessionId: session_id, ...timeline },
+            token,
+            { fetchImpl },
+          );
+          // Only remember the signature on a confirmed send, so a failed post retries next turn.
+          if (reported) {
+            state.sentTimelineSig = sig;
+            stateDirty = true;
+          }
+        }
+      }
+    } catch { /* best-effort */ }
+  }
 
   // Claude Code renames a session after the first prompt. The new name normally rides on the
   // next billable segment (each report re-reads it), but a session whose rename lands with no

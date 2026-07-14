@@ -4,4 +4,5 @@ import { exitClean } from '../lib/shutdown.mjs';
 
 const input = readHookInput();
 if (!input) process.exit(0);
-runCheckpoint(input).catch(() => {}).finally(() => exitClean(0));
+// Session end: emit the whole-session activity timeline alongside the final segment checkpoint.
+runCheckpoint(input, {}, { emitTimeline: true }).catch(() => {}).finally(() => exitClean(0));
