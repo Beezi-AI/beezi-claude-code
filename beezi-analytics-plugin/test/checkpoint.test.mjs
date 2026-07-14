@@ -845,6 +845,11 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
   writeSubagentTranscript(dir, 'sess-20', 'agent-abc123', [
     assistantLine('main', 'claude-sonnet-5', { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z'),
   ]);
+  fs.writeFileSync(
+    path.join(dir, 'sess-20', 'subagents', 'agent-abc123.meta.json'),
+    JSON.stringify({ agentType: 'Explore', spawnDepth: 1, toolUseId: 'toolu_x' }),
+    'utf-8',
+  );
 
   await runCheckpoint(
     { session_id: 'sess-20', transcript_path: transcript, cwd: dir },
@@ -861,6 +866,7 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
   const main = items.find(i => i.payload.segmentId === 'sess-20:1-1');
   assert.ok(main, 'main segment keeps its segmentId shape');
   assert.ok(main.payload.models['claude-fable-5'], 'main segment carries the main model');
+  assert.equal(main.payload.is_subagent, undefined, 'main segment is not flagged as a subagent');
 
   const agent = items.find(i => i.payload.segmentId === 'sess-20:agent-abc123:1-1');
   assert.ok(agent, 'subagent segment gets a distinct segmentId scoped by agent id');
@@ -869,6 +875,10 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
   assert.ok(agent.payload.models['claude-sonnet-5'], 'subagent model reported');
   assert.equal(agent.payload.branch, 'main');
   assert.equal(agent.payload.remote, 'https://host/org/repo.git');
+  assert.equal(agent.payload.is_subagent, true, 'subagent segment is flagged');
+  assert.equal(agent.payload.agent_id, 'agent-abc123', 'subagent id carried on the payload');
+  assert.equal(agent.payload.agent_type, 'Explore', 'agent_type read from meta.json');
+  assert.equal(agent.payload.spawn_depth, 1, 'spawn_depth read from meta.json');
 });
 
 test('21. per-agent cursor — second run only processes new subagent lines', async (t) => {

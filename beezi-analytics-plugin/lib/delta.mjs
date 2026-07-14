@@ -83,8 +83,12 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
   for (const { lineNo, line } of parsed) {
     const id = line.message?.id ?? line.requestId ?? null;
     // Whole-message signal when known (applies to every block-line incl. the first, so the
-    // message's tokens bill to the repo its own tool_use touched); else the line's own.
-    const sigDir = (id && messageDir.has(id)) ? messageDir.get(id) : extractPathSignal(line, cwd);
+    // message's tokens bill to the repo its own tool_use touched); else the line's own tool path;
+    // else the line's own recorded cwd. The cwd fallback tracks `cd`s and attributes signal-less
+    // lines (thinking / web-search / grep, and whole research subagents) to the repo they ran in,
+    // instead of only the window's seed cwd — this is what recovers dropped subagent/cwd-change tokens.
+    const toolDir = (id && messageDir.has(id)) ? messageDir.get(id) : extractPathSignal(line, cwd);
+    const sigDir = toolDir || (typeof line.cwd === 'string' ? line.cwd : null);
     if (sigDir) {
       const sigRoot = repoRootOf(sigDir);
       if (sigRoot) activeRoot = sigRoot; // last-touch-wins; unresolvable -> carry forward

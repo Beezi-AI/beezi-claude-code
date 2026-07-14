@@ -1,24 +1,47 @@
-// Bucket each tool_use in a segment into one of six operation categories and estimate the
+// Bucket each tool_use in a segment into one of seven operation categories and estimate the
 // token cost of its result. The API bills tokens per assistant MESSAGE, not per tool, so a
 // tool's real cost — its result text, which lands in the NEXT message's input — is never
 // labelled per tool. We approximate it as (matched tool_result payload bytes / 4). Counts are
 // exact; est_tokens is an estimate (cache tiering and cross-segment result splits are ignored).
+//
+// Beyond the flat category counts, two dimensions carry finer identity for the analytics
+// donut/breakdowns: mcp keeps a per-server tally (by_server), skill keeps a per-skill tally
+// (by_skill), and `plugins` is a cross-cut that re-groups skill/MCP calls by the owning plugin
+// (skill-id namespace; MCP has none in the transcript → 'unknown'). Because `plugins` overlaps
+// the mcp/skill category buckets it is a separate view, never summed alongside them.
 
 const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const SEARCH_TOOLS = new Set(['Grep', 'Glob', 'ToolSearch']);
 const INTERNET_TOOLS = new Set(['WebFetch', 'WebSearch']);
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 
-const CATEGORIES = ['file', 'search', 'internet', 'mcp', 'shell', 'other'];
+const CATEGORIES = ['file', 'search', 'internet', 'mcp', 'shell', 'skill', 'other'];
 
-// Tool name → category. MCP is matched by the mcp__<server>__<tool> prefix first.
+// Tool name → category. MCP is matched by the mcp__<server>__<tool> prefix first, then the
+// Skill tool, then the fixed tool sets; anything else falls through to 'other'.
 function categoryOf(name) {
   if (typeof name === 'string' && name.startsWith('mcp__')) return 'mcp';
+  if (name === 'Skill') return 'skill';
   if (FILE_TOOLS.has(name)) return 'file';
   if (SEARCH_TOOLS.has(name)) return 'search';
   if (INTERNET_TOOLS.has(name)) return 'internet';
   if (SHELL_TOOLS.has(name)) return 'shell';
   return 'other';
+}
+
+// Server segment of an mcp__<server>__<tool> name (substring between the 1st and 2nd '__').
+function mcpServer(name) {
+  const rest = name.slice('mcp__'.length);
+  const i = rest.indexOf('__');
+  return i === -1 ? rest : rest.slice(0, i);
+}
+
+// Plugin that owns a skill id: 'superpowers:tdd' → 'superpowers'. A namespaceless id is a
+// built-in Claude Code skill ('builtin'); a missing/blank id is 'unknown'.
+function skillPlugin(skillId) {
+  if (typeof skillId !== 'string' || skillId === '') return 'unknown';
+  const i = skillId.indexOf(':');
+  return i === -1 ? 'builtin' : skillId.slice(0, i);
 }
 
 // Byte length of a tool_result's content, tolerating both the string and text-block-array forms.
@@ -35,9 +58,10 @@ function resultBytes(content) {
   return 0;
 }
 
-// Per-category { count, est_tokens } over a segment's transcript lines. tool_use blocks live on
-// assistant lines; their tool_result (matched by tool_use_id) lands on a later user line within
-// the same segment, so a two-pass walk resolves the result size for each call.
+// Per-category { count, est_tokens } over a segment's transcript lines, plus finer maps
+// (mcp.by_server, skill.by_skill) and the `plugins` cross-cut. tool_use blocks live on assistant
+// lines; their tool_result (matched by tool_use_id) lands on a later user line within the same
+// segment, so a two-pass walk resolves the result size for each call.
 export function computeOperations(lines) {
   const bytesById = new Map();
   for (const line of lines) {
@@ -51,17 +75,38 @@ export function computeOperations(lines) {
 
   const totals = {};
   for (const cat of CATEGORIES) totals[cat] = { count: 0, est_tokens: 0 };
+  totals.mcp.by_server = {};
+  totals.skill.by_skill = {};
+  const plugins = {};
+
+  const addPlugin = (name, est) => {
+    const p = (plugins[name] ??= { count: 0, est_tokens: 0 });
+    p.count += 1;
+    p.est_tokens += est;
+  };
 
   for (const line of lines) {
     const content = line?.message?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) {
       if (block?.type !== 'tool_use') continue;
-      const cat = totals[categoryOf(block.name)];
+      const category = categoryOf(block.name);
+      const est = Math.round((bytesById.get(block.id) || 0) / 4);
+      const cat = totals[category];
       cat.count += 1;
-      cat.est_tokens += Math.round((bytesById.get(block.id) || 0) / 4);
+      cat.est_tokens += est;
+
+      if (category === 'mcp') {
+        const server = mcpServer(block.name);
+        cat.by_server[server] = (cat.by_server[server] || 0) + 1;
+        addPlugin('unknown', est); // MCP server → plugin is not knowable from the transcript
+      } else if (category === 'skill') {
+        const skillId = typeof block.input?.skill === 'string' ? block.input.skill : 'unknown';
+        cat.by_skill[skillId] = (cat.by_skill[skillId] || 0) + 1;
+        addPlugin(skillPlugin(skillId), est);
+      }
     }
   }
 
-  return totals;
+  return { ...totals, plugins };
 }

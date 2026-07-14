@@ -14,6 +14,7 @@ import { readBillingConfig, subscriptionReportFields } from './billing-config.mj
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { listSubagentTranscripts } from './subagents.mjs';
+import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -55,7 +56,12 @@ export async function runCheckpoint(input, deps = {}) {
   const remoteCache = new Map();
   const timelineCache = new Map();
 
-  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache);
+  // Persisted known-root map: seeds resolution (prefix match) and gets refreshed with any root→origin
+  // we learn this checkpoint. A best-effort hint — a load failure yields an empty map, not a throw.
+  const map = loadRepoMap();
+  let mapDirty = false;
+
+  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache, map);
 
   const branchOf = (root, ms) => {
     if (!root) return '(unknown)';
@@ -76,7 +82,12 @@ export async function runCheckpoint(input, deps = {}) {
   const resolveRemote = (root) => {
     if (!root) return null;
     if (remoteCache.has(root)) return remoteCache.get(root);
-    const r = resolveOriginRemote(gitImpl, root);
+    // git first (authoritative), then a git-free .git/config parse (rescues dubious-ownership), then
+    // the persisted map (rescues a fully-blocked git binary). Remember any origin we learn.
+    let r = resolveOriginRemote(gitImpl, root);
+    if (!r) r = originFromGitConfig(root);
+    if (!r) r = knownOrigin(root, map);
+    if (r) { upsertRoot(map, root, r); mapDirty = true; }
     remoteCache.set(root, r);
     return r;
   };
@@ -96,7 +107,7 @@ export async function runCheckpoint(input, deps = {}) {
   let enqueued = 0;
   // The last enqueued payload becomes the "anchor" we can replay to push a later rename.
   let lastPayload = null;
-  const enqueueSegments = (segs, segmentScope) => {
+  const enqueueSegments = (segs, segmentScope, extra = null) => {
     for (const seg of segs) {
       if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
       const remote = resolveRemote(seg.repoRoot);
@@ -114,6 +125,7 @@ export async function runCheckpoint(input, deps = {}) {
           billing_source: billingSource,
           ...subscriptionFields,
           session_name: sessionName,
+          ...(extra || {}),
           ...seg.stats,
         };
         enqueue(payload);
@@ -130,13 +142,18 @@ export async function runCheckpoint(input, deps = {}) {
   // collide with main-transcript segments (or each other) on the server upsert.
   const agentCursors = state.agentCursors ?? {};
   let agentCursorsDirty = false;
-  for (const { agentId, path: agentPath } of listSubagentTranscripts(transcript_path, session_id)) {
+  for (const { agentId, path: agentPath, agentType, spawnDepth } of listSubagentTranscripts(transcript_path, session_id)) {
     const agentFrom = agentCursors[agentId] ?? 0;
     let agentDelta;
     try {
       agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
     } catch { continue; }
-    enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`);
+    enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
+      is_subagent: true,
+      agent_id: agentId,
+      agent_type: agentType,
+      spawn_depth: spawnDepth,
+    });
     if (agentDelta.nextCursor !== agentFrom) {
       agentCursors[agentId] = agentDelta.nextCursor;
       agentCursorsDirty = true;
@@ -199,6 +216,9 @@ export async function runCheckpoint(input, deps = {}) {
   }
   if (stateDirty) {
     try { saveState(session_id, state); } catch { /* best-effort */ }
+  }
+  if (mapDirty) {
+    try { saveRepoMap(map); } catch { /* best-effort */ }
   }
 
   const flush = await flushQueue(token, { fetchImpl });

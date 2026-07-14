@@ -622,6 +622,70 @@ test('P8. trailing newline does not overshoot the cursor; boundary line processe
   assert.equal(second.segments[0].stats.token_input, 20, 'boundary line counted exactly once');
 });
 
+// A signal-less assistant line that carries its own recorded cwd (thinking / web / grep lines,
+// and whole research subagents, look like this).
+function cwdLine(cwd, usage, ts) {
+  return { type: 'assistant', gitBranch: 'frozen', cwd, timestamp: ts, message: { model: 'model-a', usage } };
+}
+
+test('Q1. per-line cwd drives attribution when there is no tool-path signal', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  // No tool signals anywhere; the two lines only differ by their recorded cwd (a `cd` between them).
+  const file = writeFixture(dir, [
+    cwdLine('/repo/a', U(10), '2024-01-01T10:00:00.000Z'),
+    cwdLine('/repo/b', U(20), '2024-01-01T10:01:00.000Z'),
+  ]);
+
+  const { segments } = computeDelta(file, 0, {
+    cwd: '/repo/a',
+    repoRootOf: (d) => d,
+    branchAt: (root) => `br:${root}`,
+  });
+
+  assert.deepEqual(segments.map((s) => s.repoRoot), ['/repo/a', '/repo/b']);
+  assert.equal(segments[0].stats.token_input, 10);
+  assert.equal(segments[1].stats.token_input, 20);
+});
+
+test('Q2. a leading signal-less line whose cwd is inside a repo is NOT dropped (subagent fix)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  // Seed cwd is outside any repo (multi-repo parent) — previously this whole line billed to null and
+  // was dropped. Its own cwd resolves the repo, so it now gets a real root.
+  const file = writeFixture(dir, [cwdLine('/repo/x', U(42), '2024-01-01T10:00:00.000Z')]);
+
+  const { segments } = computeDelta(file, 0, {
+    cwd: '/workspace-parent', // not a repo
+    repoRootOf: (d) => (d.startsWith('/repo/') ? d : null),
+    branchAt: () => 'feature/task-x',
+  });
+
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].repoRoot, '/repo/x', 'resolved from the line cwd, not the null seed');
+  assert.equal(segments[0].stats.token_input, 42);
+});
+
+test('Q3. truly-unresolvable line stays null (never guess)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  // cwd is outside any repo AND there is no tool signal → root stays null (the segment will be
+  // dropped downstream, by design — we do not attribute it to some other repo).
+  const file = writeFixture(dir, [cwdLine('/nowhere', U(5), '2024-01-01T10:00:00.000Z')]);
+
+  const { segments } = computeDelta(file, 0, {
+    cwd: '/nowhere',
+    repoRootOf: (d) => (d.startsWith('/repo/') ? d : null),
+    branchAt: () => 'x',
+  });
+
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].repoRoot, null, 'no guessing — unresolvable stays null');
+});
+
 test('collects rate-limit events from the window', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-rl-'));
   t.after(() => fs.rmSync(dir, { recursive: true }));
