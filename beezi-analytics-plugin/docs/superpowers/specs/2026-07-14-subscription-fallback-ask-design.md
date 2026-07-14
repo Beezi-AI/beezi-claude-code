@@ -27,7 +27,15 @@ self-reported plan.
 
 ## Behavior (`commands/login.md`)
 
-Step 3 runs the auto-capture exactly as today. Branch on its one-line output:
+When Step 1 reports the machine is already linked, Step 2 (the device flow) is
+skipped, but Step 3 (capture) and, when triggered, Step 4 (ask-fallback) still
+run. This is the escape hatch for a tier change: re-running `/beezi:login` on
+an already-linked machine is the only way to update a self-reported plan, since
+`/beezi:refresh` stays automatic-only and an auto-capture can never resolve a
+tier a human had to pick.
+
+Step 3 runs the auto-capture exactly as today (after a successful Step 2 link,
+or directly when Step 1 reported already-linked). Branch on its one-line output:
 
 1. `plan=<known tier>` → done, report the summary. No change.
 2. `source=anthropic_api_key` or `source=third_party` → skip silently. No ask.
@@ -87,8 +95,18 @@ subscription billing with a free plan.
 
 ### `scripts/billing-capture.mjs`
 
-- No logic change: `--plan` flows through the existing `parsed` args path
-  (`--from-claude` replaces args only in its own branch).
+- `--plan` flows through the existing `parsed` args path (`--from-claude`
+  replaces args only in its own branch).
+- Keep-existing guard: in the `--from-claude` path, after `buildConfig` builds
+  the fresh config and before `writeBillingConfig`, check
+  `shouldKeepExisting(freshConfig, readBillingConfig())` (from
+  `lib/billing-capture.mjs`). If true — the fresh account fields still
+  normalize to `plan: 'unknown'` AND the config on disk is a self-reported
+  plan — skip the write, print a one-line message, and exit 0. This stops an
+  automatic `/beezi:refresh` from clobbering a self-reported plan with
+  `unknown` and restarting the nudge loop the `selfReported` staleness
+  exemption exists to end. A fresh capture that resolves a real plan still
+  overwrites normally, self-reported or not.
 
 ## Error handling
 
@@ -104,7 +122,11 @@ Existing node test runner files:
 - `test/billing-capture.test.mjs`: `--plan` parsing; each allowlist value
   accepted with correct derived `subscriptionType`; invalid value throws;
   `selfReported: true` set; `--plan` + `--from-claude` throws; non-subscription
-  env nulls the plan fields.
+  env nulls the plan fields; `shouldKeepExisting` — keeps a self-reported plan
+  when the fresh capture still resolves `unknown`; overwrites when the fresh
+  capture resolves a known plan; overwrites when the existing config is not
+  self-reported; overwrites when there is no existing config; overwrites when
+  the existing plan itself is missing or `unknown`.
 - `test/billing-config.test.mjs`: `selfReported` config not stale despite old
   `capturedAt`; auto-captured config staleness unchanged; configs without the
   field behave as before.
