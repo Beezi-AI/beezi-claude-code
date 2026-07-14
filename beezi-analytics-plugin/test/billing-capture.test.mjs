@@ -151,3 +151,9 @@ test('shouldKeepExisting — overwrites when the existing plan is missing or unk
   assert.equal(shouldKeepExisting(fresh, { selfReported: true, plan: null }), false);
   assert.equal(shouldKeepExisting(fresh, { selfReported: true }), false);
 });
+
+test('shouldKeepExisting — a non-subscription fresh capture (plan null) still overwrites', () => {
+  // The guard protects only against 'unknown'; a machine that moved to api-key
+  // billing must be able to replace a stale self-report with the nulled config.
+  assert.equal(shouldKeepExisting({ plan: null }, { selfReported: true, plan: 'pro' }), false);
+});

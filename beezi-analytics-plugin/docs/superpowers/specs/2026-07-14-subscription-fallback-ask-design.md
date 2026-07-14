@@ -49,6 +49,13 @@ or directly when Step 1 reported already-linked). Branch on its one-line output:
    - If the user dismisses the question, or answers "Other" with text that maps
      to none of the five values, skip the capture and report that the link
      itself succeeded (current behavior preserved).
+4. `keeping the self-reported plan` (the keep-existing guard fired: fresh
+   capture still `unknown`, a self-reported plan already on disk) → step 4
+   still runs. An answer overwrites the old self-report via the same `--plan`
+   command; a dismissal leaves the old self-report untouched. Without this
+   trigger, an already-linked machine whose account never resolves could never
+   update its self-reported tier — the exact population the already-linked
+   escape hatch exists for.
 
 The AskUserQuestion tool caps a question at 4 options, which is why Team and
 Enterprise share a slot with a follow-up question — every real tier stays
