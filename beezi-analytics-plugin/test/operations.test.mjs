@@ -50,9 +50,9 @@ test('Skill tool lands in skill bucket with per-skill tally, not other', () => {
   assert.equal(r.skill.count, 4);
   assert.equal(r.other.count, 0);
   assert.deepEqual(r.skill.by_skill, {
-    'superpowers:test-driven-development': 2,
-    'beezi:track': 1,
-    unknown: 1,
+    'superpowers:test-driven-development': { count: 2, est_tokens: 0 },
+    'beezi:track': { count: 1, est_tokens: 0 },
+    unknown: { count: 1, est_tokens: 0 },
   });
 });
 
@@ -64,7 +64,52 @@ test('mcp calls tally per server between the __ delimiters', () => {
   ];
   const r = computeOperations(lines);
   assert.equal(r.mcp.count, 3);
-  assert.deepEqual(r.mcp.by_server, { 'azure-devops': 2, figma: 1 });
+  assert.deepEqual(r.mcp.by_server, {
+    'azure-devops': { count: 2, est_tokens: 0 },
+    figma: { count: 1, est_tokens: 0 },
+  });
+});
+
+test('by_server accumulates est_tokens per server and sums to the mcp bucket total', () => {
+  const lines = [
+    asstLine(tool('mcp__azure-devops__repo_list', 't1')),
+    resultLine('t1', 'a'.repeat(400)), // 100 est
+    asstLine(tool('mcp__azure-devops__repo_reply', 't2')),
+    resultLine('t2', 'b'.repeat(80)), // 20 est
+    asstLine(tool('mcp__figma__get_file', 't3')),
+    resultLine('t3', 'c'.repeat(40)), // 10 est
+    asstLine(tool('mcp__figma__get_comments', 't4')), // no result → 0 est
+  ];
+  const r = computeOperations(lines);
+  assert.deepEqual(r.mcp.by_server, {
+    'azure-devops': { count: 2, est_tokens: 120 },
+    figma: { count: 2, est_tokens: 10 },
+  });
+  const subtypeSum = Object.values(r.mcp.by_server).reduce((s, v) => s + v.est_tokens, 0);
+  assert.equal(subtypeSum, r.mcp.est_tokens);
+});
+
+test('by_skill accumulates est_tokens per skill and sums to the skill bucket total', () => {
+  const lines = [
+    asstLine(tool('Skill', 't1', { skill: 'superpowers:tdd' })),
+    resultLine('t1', 'a'.repeat(400)), // 100 est
+    asstLine(tool('Skill', 't2', { skill: 'superpowers:tdd' })),
+    resultLine('t2', 'b'.repeat(40)), // 10 est
+    asstLine(tool('Skill', 't3', {})), // unknown, no result → 0 est
+  ];
+  const r = computeOperations(lines);
+  assert.deepEqual(r.skill.by_skill, {
+    'superpowers:tdd': { count: 2, est_tokens: 110 },
+    unknown: { count: 1, est_tokens: 0 },
+  });
+  const subtypeSum = Object.values(r.skill.by_skill).reduce((s, v) => s + v.est_tokens, 0);
+  assert.equal(subtypeSum, r.skill.est_tokens);
+});
+
+test('an mcp name with a blank server segment falls back to unknown', () => {
+  const r = computeOperations([asstLine(tool('mcp__', 't1')), asstLine(tool('mcp____tool', 't2'))]);
+  assert.equal(r.mcp.count, 2);
+  assert.deepEqual(r.mcp.by_server, { unknown: { count: 2, est_tokens: 0 } });
 });
 
 test('plugins cross-cut groups skills by namespace and MCP as unknown', () => {

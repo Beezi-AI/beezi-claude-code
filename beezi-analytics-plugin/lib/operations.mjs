@@ -30,10 +30,12 @@ function categoryOf(name) {
 }
 
 // Server segment of an mcp__<server>__<tool> name (substring between the 1st and 2nd '__').
+// A blank segment (malformed name) falls back to 'unknown' so subtype tallies stay keyed.
 function mcpServer(name) {
   const rest = name.slice('mcp__'.length);
   const i = rest.indexOf('__');
-  return i === -1 ? rest : rest.slice(0, i);
+  const server = i === -1 ? rest : rest.slice(0, i);
+  return server === '' ? 'unknown' : server;
 }
 
 // Plugin that owns a skill id: 'superpowers:tdd' → 'superpowers'. A namespaceless id is a
@@ -98,11 +100,15 @@ export function computeOperations(lines) {
 
       if (category === 'mcp') {
         const server = mcpServer(block.name);
-        cat.by_server[server] = (cat.by_server[server] || 0) + 1;
+        const s = (cat.by_server[server] ??= { count: 0, est_tokens: 0 });
+        s.count += 1;
+        s.est_tokens += est;
         addPlugin('unknown', est); // MCP server → plugin is not knowable from the transcript
       } else if (category === 'skill') {
         const skillId = typeof block.input?.skill === 'string' ? block.input.skill : 'unknown';
-        cat.by_skill[skillId] = (cat.by_skill[skillId] || 0) + 1;
+        const s = (cat.by_skill[skillId] ??= { count: 0, est_tokens: 0 });
+        s.count += 1;
+        s.est_tokens += est;
         addPlugin(skillPlugin(skillId), est);
       }
     }
