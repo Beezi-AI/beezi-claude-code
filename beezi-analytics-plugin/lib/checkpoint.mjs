@@ -189,8 +189,8 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   if (options.emitTimeline) {
     try {
       const timeline = computeSessionTimeline(transcript_path, session_id);
-      if (timeline && (timeline.periods.length > 0 || timeline.subagents.length > 0)) {
-        const sig = `${JSON.stringify(timeline.periods)}|${JSON.stringify(timeline.subagents)}`;
+      if (timeline && (timeline.periods.length > 0 || timeline.subagents.length > 0 || timeline.plan_events.length > 0)) {
+        const sig = `${JSON.stringify(timeline.periods)}|${JSON.stringify(timeline.subagents)}|${JSON.stringify(timeline.plan_events)}`;
         if (sig !== state.sentTimelineSig) {
           const { reported } = await postSessionTimeline(
             { sessionId: session_id, ...timeline },

@@ -6,7 +6,8 @@ import { postJson } from './http.mjs';
 
 // Work done while a plan permission mode is active is `planning`. Matched loosely (substring) so a
 // schema tweak — 'plan', 'plan_mode', 'planning' — still classifies as planning instead of silently
-// falling back to `working` and dropping the whole planning dimension.
+// falling back to `working` and dropping the whole planning dimension. The other permission modes
+// ('default', 'auto', 'acceptEdits') don't contain 'plan', so they read as `working`.
 const isPlanMode = (mode) => typeof mode === 'string' && mode.toLowerCase().includes('plan');
 
 const STATE = {
@@ -33,13 +34,40 @@ function tsOf(line) {
   return line?.timestamp ? new Date(line.timestamp).getTime() : null;
 }
 
+// The active permission mode, from either a dedicated `type:'permission-mode'` change line or the
+// `permissionMode` stamped on a normal (user) line. Claude Code's `type:'mode'` lines carry the
+// EDITOR mode ('normal'/'insert'), NOT the permission mode — reading those never surfaced planning.
+// Neither the change line nor most work lines are timestamped/plan-stamped, so the mode is tracked
+// forward from whichever line last set it.
+function permissionModeOf(line) {
+  if (line?.type === 'permission-mode' && typeof line.permissionMode === 'string') {
+    return line.permissionMode;
+  }
+  return typeof line?.permissionMode === 'string' ? line.permissionMode : null;
+}
+
+// A Ctrl+C / Esc interrupt is written as a type:'user' line whose text is
+// '[Request interrupted by user]' (or '...for tool use'). No Stop hook fires on an interrupt, so
+// the aborted turn is only emitted at the next Stop/SessionEnd — and only classifies correctly if
+// this marker is NOT read as a turn-start: the gap before it is the agent's aborted WORK, not the
+// human thinking.
+const INTERRUPT_PREFIX = '[Request interrupted by user';
+function isInterruptMarker(line) {
+  const c = line?.message?.content;
+  if (!Array.isArray(c)) return false;
+  return c.some(
+    (b) => b?.type === 'text' && typeof b.text === 'string' && b.text.startsWith(INTERRUPT_PREFIX),
+  );
+}
+
 // A genuine user turn-start, as opposed to a tool_result echo (Claude Code writes those as
-// type:'user' too) or an injected meta line. The gap BEFORE such a line is time the agent spent
-// waiting on the human.
+// type:'user' too), an interrupt marker, or an injected meta line. The gap BEFORE such a line is
+// time the agent spent waiting on the human.
 function isRealUserPrompt(line) {
   if (line?.type !== 'user') return false;
   if (line.isMeta || line.isCompactSummary) return false;
   if (line.toolUseResult !== undefined) return false;
+  if (isInterruptMarker(line)) return false;
   const c = line.message?.content;
   if (typeof c === 'string') return c.trim().length > 0;
   if (Array.isArray(c)) {
@@ -49,17 +77,18 @@ function isRealUserPrompt(line) {
   return false;
 }
 
-// Walk the transcript in file order, tracking the active permission mode (flipped by type:'mode'
-// lines, which may themselves lack timestamps). Classify each interval between consecutive
-// timestamped anchors, then merge adjacent same-state runs into periods.
+// Walk the transcript in file order, tracking the active permission mode (set by permission-mode
+// change lines and the permissionMode field on user lines; assistant work lines inherit the last
+// value). Classify each interval between consecutive timestamped anchors, then merge adjacent
+// same-state runs into periods.
 function buildPeriods(lines) {
   let currentMode = 'default';
   const anchors = [];
   for (const line of lines) {
-    if (line?.type === 'mode' && typeof line.mode === 'string') {
-      currentMode = line.mode;
-      continue;
-    }
+    const pm = permissionModeOf(line);
+    if (pm != null) currentMode = pm;
+    // A permission-mode change line has no timestamp — it flips the mode but isn't an anchor.
+    if (line?.type === 'permission-mode') continue;
     const ms = tsOf(line);
     if (ms == null) continue;
     anchors.push({ ts: ms, isPrompt: isRealUserPrompt(line), mode: currentMode });
@@ -85,6 +114,50 @@ function buildPeriods(lines) {
     started_at: new Date(m.startMs).toISOString(),
     ended_at: new Date(m.endMs).toISOString(),
   }));
+}
+
+// Does this line carry an assistant `ExitPlanMode` tool_use block? That block marks Claude
+// presenting a finished plan, and it sits on a timestamped line (unlike mode lines). Mirrors the
+// content-block scan inlined in operations.mjs / code-changes.mjs.
+function hasExitPlanMode(line) {
+  const content = line?.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => b?.type === 'tool_use' && b.name === 'ExitPlanMode');
+}
+
+// Discrete plan-mode markers, complementing the continuous `planning` periods:
+//   plan_start — entered plan permission mode (a permission-mode change line, or a user line
+//     stamped permissionMode:'plan'). Those aren't timestamped/plan-stamped on the change itself,
+//     so the marker is anchored to the next timestamped line — matching how buildPeriods dates
+//     plan-mode work.
+//   plan_ready — Claude presented a finished plan via ExitPlanMode; that block is timestamped, so
+//     the marker is exact.
+// A session may hold several plan cycles; each entry/present is emitted independently. Plan mode
+// entered but never presented yields a lone plan_start (acceptable).
+function buildPlanEvents(lines) {
+  const events = [];
+  let inPlan = false;
+  let pendingStart = false;
+  for (const line of lines) {
+    const pm = permissionModeOf(line);
+    if (pm != null) {
+      const nowPlan = isPlanMode(pm);
+      if (nowPlan && !inPlan) pendingStart = true; // stamp on the next timestamped line
+      inPlan = nowPlan;
+    }
+    if (line?.type === 'permission-mode') continue; // no timestamp — mode flip only
+    const ms = tsOf(line);
+    if (ms == null) continue;
+    if (pendingStart) {
+      events.push({ type: 'plan_start', at: new Date(ms).toISOString() });
+      pendingStart = false;
+    }
+    if (hasExitPlanMode(line)) {
+      events.push({ type: 'plan_ready', at: new Date(ms).toISOString() });
+    }
+  }
+  events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return events;
 }
 
 // One active span per subagent transcript (first→last timestamp). Parallel subagents overlap in
@@ -115,6 +188,7 @@ export function computeSessionTimeline(transcriptPath, sessionId) {
   try { lines = parseTranscript(transcriptPath); } catch { return null; }
 
   const periods = buildPeriods(lines);
+  const plan_events = buildPlanEvents(lines);
   const subagents = buildSubagents(transcriptPath, sessionId);
 
   // Axis domain = earliest/latest timestamp across main + subagent activity. Single-pass min/max
@@ -137,6 +211,7 @@ export function computeSessionTimeline(transcriptPath, sessionId) {
 
   return {
     periods,
+    plan_events,
     subagents,
     started_at: new Date(minTs).toISOString(),
     ended_at: new Date(maxTs).toISOString(),

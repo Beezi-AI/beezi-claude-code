@@ -27,9 +27,9 @@ function setup(t) {
   writeJsonl(transcriptPath, [
     { type: 'user', message: { content: 'do X' }, timestamp: ts(0) },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, timestamp: ts(10) },
-    { type: 'mode', mode: 'plan' },
+    { type: 'permission-mode', permissionMode: 'plan' },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'planning' }] }, timestamp: ts(30) },
-    { type: 'mode', mode: 'default' },
+    { type: 'permission-mode', permissionMode: 'default' },
     // tool_result echo — type:'user' but carries a tool_result, so it's activity, not a turn-start.
     { type: 'user', toolUseResult: { stdout: '' }, message: { content: [{ type: 'tool_result', content: 'ok' }] }, timestamp: ts(40) },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'more' }] }, timestamp: ts(60) },
@@ -53,7 +53,7 @@ function setup(t) {
   return { transcriptPath, sessionId };
 }
 
-test('derives merged main-agent state periods from mode lines, prompts, and idle gaps', (t) => {
+test('derives merged main-agent state periods from permission-mode, prompts, and idle gaps', (t) => {
   const { transcriptPath, sessionId } = setup(t);
   const tl = computeSessionTimeline(transcriptPath, sessionId);
 
@@ -89,17 +89,118 @@ test('derives one active span per subagent transcript', (t) => {
   });
 });
 
-test('plan-mode is matched loosely so a schema variant still classifies as planning', (t) => {
+test('planning is driven by permissionMode; assistant work inherits it and vim type:mode is ignored', (t) => {
   const dir = makeTmpDir(t);
   const transcriptPath = path.join(dir, 'plan.jsonl');
   writeJsonl(transcriptPath, [
-    { type: 'user', message: { content: 'do X' }, timestamp: ts(0) },
+    { type: 'user', message: { content: 'do X' }, permissionMode: 'default', timestamp: ts(0) },
+    // vim editor mode — Claude Code writes this as type:'mode':'normal'; it must NOT touch classification.
+    { type: 'mode', mode: 'normal' },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, timestamp: ts(10) },
-    { type: 'mode', mode: 'plan_mode' },
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'planning' }] }, timestamp: ts(30) },
+    // Enter plan mode via the real dedicated change line (no timestamp).
+    { type: 'permission-mode', permissionMode: 'plan' },
+    // Assistant work lines carry NO permissionMode — they must inherit 'plan' across the whole turn.
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'planning a' }] }, timestamp: ts(30) },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'planning b' }] }, timestamp: ts(50) },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'building' }] }, timestamp: ts(70) },
   ]);
   const tl = computeSessionTimeline(transcriptPath, 'plan');
-  assert.ok(tl.periods.some((p) => p.state === 'planning'), "'plan_mode' read as planning");
+  const planning = tl.periods.find((p) => p.state === 'planning');
+  // Planning spans the inherited-mode assistant work [10,50], not just a single interval.
+  assert.deepEqual([planning.started_at, planning.ended_at], [ts(10), ts(50)]);
+  assert.ok(tl.periods.some((p) => p.state === 'working'), 'post-plan work is working');
+});
+
+test('a user interrupt (Ctrl+C) counts as aborted work, not waiting_user', (t) => {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, 'interrupt.jsonl');
+  writeJsonl(transcriptPath, [
+    { type: 'user', message: { content: 'do X' }, timestamp: ts(0) },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] }, timestamp: ts(10) },
+    // Ctrl+C: written as a type:'user' line, but the gap before it is aborted agent work — it must
+    // not read as a turn-start (which would mislabel that work as waiting_user).
+    { type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] }, timestamp: ts(20) },
+    { type: 'user', message: { content: 'next' }, timestamp: ts(600) },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'resume' }] }, timestamp: ts(610) },
+  ]);
+  const tl = computeSessionTimeline(transcriptPath, 'interrupt');
+
+  // Aborted work [10,20] stays working and merges into [0,20]; it does NOT become waiting_user.
+  const working = tl.periods.filter((p) => p.state === 'working');
+  assert.deepEqual([working[0].started_at, working[0].ended_at], [ts(0), ts(20)]);
+
+  // The only real wait is AFTER the interrupt, until the next genuine prompt.
+  const waits = tl.periods.filter((p) => p.state === 'waiting_user');
+  assert.equal(waits.length, 1, 'the interrupt did not create a spurious wait');
+  assert.deepEqual([waits[0].started_at, waits[0].ended_at], [ts(20), ts(600)]);
+});
+
+test('the "for tool use" interrupt variant is also not a turn-start', (t) => {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, 'interrupt-tool.jsonl');
+  writeJsonl(transcriptPath, [
+    { type: 'user', message: { content: 'do X' }, timestamp: ts(0) },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] }, timestamp: ts(10) },
+    { type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] }, timestamp: ts(20) },
+  ]);
+  const tl = computeSessionTimeline(transcriptPath, 'interrupt-tool');
+  assert.ok(!tl.periods.some((p) => p.state === 'waiting_user'), 'no wait from the interrupt');
+  assert.ok(tl.periods.some((p) => p.state === 'working'), 'aborted work is working');
+});
+
+test('emits plan_start (anchored to next timestamp) and plan_ready (at ExitPlanMode)', (t) => {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, 'events.jsonl');
+  writeJsonl(transcriptPath, [
+    { type: 'user', message: { content: 'do X' }, timestamp: ts(0) },
+    // permission-mode line has no timestamp → plan_start anchors to the next timestamped line (ts 20).
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'thinking' }] }, timestamp: ts(20) },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(50) },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'building' }] }, timestamp: ts(60) },
+  ]);
+  const tl = computeSessionTimeline(transcriptPath, 'events');
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(20) },
+    { type: 'plan_ready', at: ts(50) },
+  ]);
+});
+
+test('emits one plan_start/plan_ready pair per plan cycle, ordered', (t) => {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, 'cycles.jsonl');
+  writeJsonl(transcriptPath, [
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(10) },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(20) },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'work' }] }, timestamp: ts(30) },
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'b' }] }, timestamp: ts(40) },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p2', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(50) },
+  ]);
+  const tl = computeSessionTimeline(transcriptPath, 'cycles');
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+    { type: 'plan_start', at: ts(40) },
+    { type: 'plan_ready', at: ts(50) },
+  ]);
+});
+
+test('plan mode with no ExitPlanMode yields a lone plan_start', (t) => {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, 'cancelled.jsonl');
+  writeJsonl(transcriptPath, [
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'planning' }] }, timestamp: ts(15) },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'abandoned' }] }, timestamp: ts(25) },
+  ]);
+  const tl = computeSessionTimeline(transcriptPath, 'cancelled');
+  assert.deepEqual(tl.plan_events, [{ type: 'plan_start', at: ts(15) }]);
 });
 
 test('empty transcript yields null (nothing to place on the axis)', (t) => {
