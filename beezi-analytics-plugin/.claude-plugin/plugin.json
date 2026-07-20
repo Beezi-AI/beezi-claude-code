@@ -1,6 +1,6 @@
 {
   "name": "beezi",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Reports Claude Code session token analytics for Beezi task branches.",
   "author": { "name": "Beezi" }
 }
