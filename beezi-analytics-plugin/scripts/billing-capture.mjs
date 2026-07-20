@@ -1,6 +1,7 @@
 import { parseArgs, buildConfig, shouldKeepExisting } from '../lib/billing-capture.mjs';
 import { readBillingConfig, writeBillingConfig } from '../lib/billing-config.mjs';
 import { readClaudeAccount } from '../lib/claude-account.mjs';
+import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 try {
   const parsed = parseArgs(process.argv.slice(2));
@@ -32,6 +33,6 @@ try {
   writeBillingConfig(config);
   console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan ?? 'n/a'}.`);
 } catch (error) {
-  console.error(`✗ ${error.message}`);
+  console.error(`✗ ${friendlyMessage(error)}`);
   process.exit(1);
 }

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { matchKnownRoot, findRepoRootByWalk } from './repo-map.mjs';
 
 // Match a `cd`/`pushd` (optionally `cd /d`) at a command boundary; capture the target,
 // quoted or bare. Global so we can take the LAST match in a compound command.
@@ -62,9 +63,12 @@ export function extractPathSignal(line, cwd) {
   return dir;
 }
 
-// git repo root for `dir` (`rev-parse --show-toplevel`), memoized in `cache`.
-// Returns null when `dir` is falsy, not in a repo, or git throws.
-export function resolveRepoRoot(gitImpl, dir, cache) {
+// git repo root for `dir`, memoized in `cache`. Resolution order: `git rev-parse --show-toplevel`
+// (authoritative — handles subdirs/worktrees/submodules), then the persisted known-root map
+// (longest-prefix), then a filesystem walk-up. The last two rescue git false-nulls (git not on
+// PATH, 5s timeout, Windows dubious-ownership) where the dir genuinely is inside a repo.
+// Returns null when `dir` is falsy or no layer resolves a root.
+export function resolveRepoRoot(gitImpl, dir, cache, map = null) {
   if (!dir) return null;
   if (cache && cache.has(dir)) return cache.get(dir);
   let root = null;
@@ -74,6 +78,8 @@ export function resolveRepoRoot(gitImpl, dir, cache) {
   } catch {
     root = null;
   }
+  if (root === null && map) root = matchKnownRoot(dir, map);
+  if (root === null) root = findRepoRootByWalk(dir);
   if (cache) cache.set(dir, root);
   return root;
 }

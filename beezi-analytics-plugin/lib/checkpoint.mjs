@@ -9,11 +9,13 @@ import { resolveRepoRoot } from './repo-timeline.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { postSessionError } from './session-error-report.mjs';
+import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { detectBillingSource } from './billing.mjs';
 import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { listSubagentTranscripts } from './subagents.mjs';
+import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -33,8 +35,21 @@ function enqueue(payload) {
   writeJsonSecure(path.join(queueDir(), filename), payload);
 }
 
+// The machine's IANA timezone (e.g. Europe/Kyiv). Snapshotted per checkpoint so the server can
+// bucket this session's activity in the user's local time even if they later travel. Null when
+// the runtime can't resolve one — the field is then omitted from the payload.
+function detectTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// `deps` holds substitutable implementations (test seams); `options` holds caller-driven execution
+// modes. Keeping them separate stops a behavior flag from masquerading as an injectable.
 // Returns { enqueued, flush } — flush is the flushQueue summary (or null when it never ran).
-export async function runCheckpoint(input, deps = {}) {
+export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
   const getToken = deps.getToken ?? _getToken;
   const gitImpl = deps.gitImpl ?? git;
@@ -55,7 +70,12 @@ export async function runCheckpoint(input, deps = {}) {
   const remoteCache = new Map();
   const timelineCache = new Map();
 
-  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache);
+  // Persisted known-root map: seeds resolution (prefix match) and gets refreshed with any root→origin
+  // we learn this checkpoint. A best-effort hint — a load failure yields an empty map, not a throw.
+  const map = loadRepoMap();
+  let mapDirty = false;
+
+  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache, map);
 
   const branchOf = (root, ms) => {
     if (!root) return '(unknown)';
@@ -76,7 +96,12 @@ export async function runCheckpoint(input, deps = {}) {
   const resolveRemote = (root) => {
     if (!root) return null;
     if (remoteCache.has(root)) return remoteCache.get(root);
-    const r = resolveOriginRemote(gitImpl, root);
+    // git first (authoritative), then a git-free .git/config parse (rescues dubious-ownership), then
+    // the persisted map (rescues a fully-blocked git binary). Remember any origin we learn.
+    let r = resolveOriginRemote(gitImpl, root);
+    if (!r) r = originFromGitConfig(root);
+    if (!r) r = knownOrigin(root, map);
+    if (r) { upsertRoot(map, root, r); mapDirty = true; }
     remoteCache.set(root, r);
     return r;
   };
@@ -96,7 +121,8 @@ export async function runCheckpoint(input, deps = {}) {
   let enqueued = 0;
   // The last enqueued payload becomes the "anchor" we can replay to push a later rename.
   let lastPayload = null;
-  const enqueueSegments = (segs, segmentScope) => {
+  const timezone = detectTimezone();
+  const enqueueSegments = (segs, segmentScope, extra = null) => {
     for (const seg of segs) {
       if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
       const remote = resolveRemote(seg.repoRoot);
@@ -114,6 +140,8 @@ export async function runCheckpoint(input, deps = {}) {
           billing_source: billingSource,
           ...subscriptionFields,
           session_name: sessionName,
+          ...(timezone ? { timezone } : {}),
+          ...(extra || {}),
           ...seg.stats,
         };
         enqueue(payload);
@@ -130,13 +158,18 @@ export async function runCheckpoint(input, deps = {}) {
   // collide with main-transcript segments (or each other) on the server upsert.
   const agentCursors = state.agentCursors ?? {};
   let agentCursorsDirty = false;
-  for (const { agentId, path: agentPath } of listSubagentTranscripts(transcript_path, session_id)) {
+  for (const { agentId, path: agentPath, agentType, spawnDepth } of listSubagentTranscripts(transcript_path, session_id)) {
     const agentFrom = agentCursors[agentId] ?? 0;
     let agentDelta;
     try {
       agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
     } catch { continue; }
-    enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`);
+    enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
+      is_subagent: true,
+      agent_id: agentId,
+      agent_type: agentType,
+      spawn_depth: spawnDepth,
+    });
     if (agentDelta.nextCursor !== agentFrom) {
       agentCursors[agentId] = agentDelta.nextCursor;
       agentCursorsDirty = true;
@@ -160,6 +193,32 @@ export async function runCheckpoint(input, deps = {}) {
   }
 
   let stateDirty = false;
+
+  // The activity timeline is whole-session, so it's re-derived from the full transcript and shipped
+  // only at turn-ends (Stop / SessionEnd) — not on the frequent PostToolUse:Bash path. Skip the POST
+  // when the derived content is identical to the last one we sent (a Stop with no new activity), so
+  // we don't re-upsert the same growing jsonb every turn. Best-effort: a failure must never break the
+  // checkpoint.
+  if (options.emitTimeline) {
+    try {
+      const timeline = computeSessionTimeline(transcript_path, session_id);
+      if (timeline && (timeline.periods.length > 0 || timeline.subagents.length > 0 || timeline.plan_events.length > 0)) {
+        const sig = `${JSON.stringify(timeline.periods)}|${JSON.stringify(timeline.subagents)}|${JSON.stringify(timeline.plan_events)}`;
+        if (sig !== state.sentTimelineSig) {
+          const { reported } = await postSessionTimeline(
+            { sessionId: session_id, ...timeline },
+            token,
+            { fetchImpl },
+          );
+          // Only remember the signature on a confirmed send, so a failed post retries next turn.
+          if (reported) {
+            state.sentTimelineSig = sig;
+            stateDirty = true;
+          }
+        }
+      }
+    } catch { /* best-effort */ }
+  }
 
   // Claude Code renames a session after the first prompt. The new name normally rides on the
   // next billable segment (each report re-reads it), but a session whose rename lands with no
@@ -199,6 +258,9 @@ export async function runCheckpoint(input, deps = {}) {
   }
   if (stateDirty) {
     try { saveState(session_id, state); } catch { /* best-effort */ }
+  }
+  if (mapDirty) {
+    try { saveRepoMap(map); } catch { /* best-effort */ }
   }
 
   const flush = await flushQueue(token, { fetchImpl });

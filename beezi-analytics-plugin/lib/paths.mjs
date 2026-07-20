@@ -13,6 +13,11 @@ export function stateDir() {
   return path.join(beeziHome(), 'state');
 }
 
+// Persisted known-repo-root map (dir→root resolution cache/seed). One JSON for the machine.
+export function repoMapFile() {
+  return path.join(beeziHome(), 'repo-map.json');
+}
+
 export function credentialsFile() {
   return path.join(beeziHome(), 'credentials.json');
 }

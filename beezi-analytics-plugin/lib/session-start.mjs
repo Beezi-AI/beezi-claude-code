@@ -3,6 +3,14 @@ import path from 'node:path';
 import { getToken as _getToken, deleteToken as _deleteToken } from './credentials.mjs';
 import { flushQueue } from './checkpoint.mjs';
 import { git as _git, resolveOriginRemote } from './git.mjs';
+import { resolveRepoRoot } from './repo-timeline.mjs';
+import {
+  loadRepoMap,
+  saveRepoMap,
+  upsertRoot,
+  pruneRepoMap,
+  originFromGitConfig,
+} from './repo-map.mjs';
 import { stateDir } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
@@ -24,6 +32,41 @@ export function initSessionState(sessionId, { cwd = null, transcriptPath = null 
   state.transcriptPath = transcriptPath;
   state.updatedAt = new Date().toISOString();
   writeJsonSecure(p, state);
+}
+
+// Pre-warm the persisted repo-map at session start so the checkpoint hot path resolves most dirs
+// without shelling git. Resolves the launch cwd's root+origin; when the launch cwd is itself a
+// non-repo parent (e.g. a multi-repo workspace folder), shallow-scans its immediate children (one
+// level) for a .git and maps each child repo. Best-effort; never throws. Returns the (possibly
+// mutated) map plus a dirty flag.
+export function discoverRepos(cwd, gitImpl, map, deps = {}) {
+  const fsImpl = deps.fs ?? fs;
+  let dirty = false;
+  if (!cwd) return { map, dirty };
+  const cache = new Map();
+  const recordRoot = (root) => {
+    if (!root) return;
+    const origin = resolveOriginRemote(gitImpl, root) ?? originFromGitConfig(root);
+    upsertRoot(map, root, origin);
+    dirty = true;
+  };
+
+  const launchRoot = resolveRepoRoot(gitImpl, cwd, cache, map);
+  if (launchRoot) {
+    recordRoot(launchRoot);
+  } else {
+    let entries;
+    try { entries = fsImpl.readdirSync(cwd, { withFileTypes: true }); } catch { entries = []; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const child = path.join(cwd, entry.name);
+      try {
+        if (!fsImpl.existsSync(path.join(child, '.git'))) continue;
+      } catch { continue; }
+      recordRoot(resolveRepoRoot(gitImpl, child, cache, map) ?? child);
+    }
+  }
+  return { map, dirty };
 }
 
 async function announceRepo(cwd, token, fetchImpl, gitImpl) {
@@ -78,6 +121,14 @@ export async function runSessionStart(input, deps = {}) {
     announceRepo(input.cwd, token, fetchImpl, gitImpl),
   ]);
   try { pruneStale(); } catch { /* best-effort */ }
+
+  // Pre-warm + self-heal the repo-map: discover this session's repo(s) and drop dead roots.
+  try {
+    const map = loadRepoMap();
+    const { dirty } = discoverRepos(input.cwd, gitImpl, map);
+    const removed = pruneRepoMap(map);
+    if (dirty || removed > 0) saveRepoMap(map);
+  } catch { /* best-effort */ }
 
   let message = systemMessage;
   if (detectBillingSource() === BillingSource.SUBSCRIPTION && isStale(readBillingConfig())) {
