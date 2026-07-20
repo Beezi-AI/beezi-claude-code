@@ -908,6 +908,48 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
   assert.equal(agent.payload.agent_id, 'agent-abc123', 'subagent id carried on the payload');
   assert.equal(agent.payload.agent_type, 'Explore', 'agent_type read from meta.json');
   assert.equal(agent.payload.spawn_depth, 1, 'spawn_depth read from meta.json');
+  assert.equal(agent.payload.agent_name, null, 'agent_name null when the main transcript has no matching Task block');
+});
+
+test('20b. subagent agent_name resolves from the spawning Task block description', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    {
+      type: 'assistant',
+      gitBranch: 'main',
+      timestamp: '2024-01-01T10:00:00.000Z',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'Task', id: 'toolu_named', input: { description: 'Explore analytics plugin', subagent_type: 'Explore' } },
+        ],
+      },
+    },
+    assistantLine('main', 'claude-fable-5', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:01.000Z'),
+  ]);
+  writeSubagentTranscript(dir, 'sess-20b', 'agent-named', [
+    assistantLine('main', 'claude-sonnet-5', { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z'),
+  ]);
+  fs.writeFileSync(
+    path.join(dir, 'sess-20b', 'subagents', 'agent-named.meta.json'),
+    JSON.stringify({ agentType: 'Explore', spawnDepth: 1, toolUseId: 'toolu_named' }),
+    'utf-8',
+  );
+
+  await runCheckpoint(
+    { session_id: 'sess-20b', transcript_path: transcript, cwd: dir },
+    {
+      getToken: async () => 'tok',
+      gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+      fetchImpl: fakeFetch(503),
+    },
+  );
+
+  const agent = readQueue(dir).find(i => i.payload.is_subagent);
+  assert.ok(agent, 'subagent segment enqueued');
+  assert.equal(agent.payload.agent_type, 'Explore');
+  assert.equal(agent.payload.agent_name, 'Explore analytics plugin', 'agent_name = spawning Task block description');
 });
 
 test('21. per-agent cursor — second run only processes new subagent lines', async (t) => {

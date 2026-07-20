@@ -1,6 +1,6 @@
 import { billingConfigFile } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
-import { BillingSource } from './billing.mjs';
+import { BillingSource, detectThirdPartyProvider } from './billing.mjs';
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000; // refresh plan info at least weekly
 
@@ -33,4 +33,12 @@ export function subscriptionReportFields(billingSource, config) {
     rate_limit_tier: config.rateLimitTier ?? null,
     subscription_plan: config.plan ?? null,
   };
+}
+
+// The report payload key naming the third-party provider, or {} when billing is not third-party
+// (or the provider can't be identified from the env). Env-based — no persisted config needed.
+export function thirdPartyReportFields(billingSource, env = process.env) {
+  if (billingSource !== BillingSource.THIRD_PARTY) return {};
+  const provider = detectThirdPartyProvider(env);
+  return provider ? { third_party_provider: provider } : {};
 }

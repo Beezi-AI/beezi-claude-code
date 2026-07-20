@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listSubagentTranscripts } from '../lib/subagents.mjs';
+import { listSubagentTranscripts, buildTaskDescriptionMap } from '../lib/subagents.mjs';
 
 function makeTmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beezi-subagents-'));
@@ -35,6 +35,7 @@ test('returns agentType and spawnDepth from the sibling meta.json', (t) => {
   assert.equal(entry.agentId, 'agent-abc');
   assert.equal(entry.agentType, 'Explore');
   assert.equal(entry.spawnDepth, 2);
+  assert.equal(entry.toolUseId, 'toolu_1', 'toolUseId carried for name resolution');
 });
 
 test('missing or malformed meta.json yields null identity, transcript still listed', (t) => {
@@ -57,4 +58,32 @@ test('no subagents dir → empty list', (t) => {
   const transcriptPath = path.join(transcriptDir, 'sess-x.jsonl');
   fs.writeFileSync(transcriptPath, '', 'utf-8');
   assert.deepEqual(listSubagentTranscripts(transcriptPath, 'sess-x'), []);
+});
+
+test('buildTaskDescriptionMap — maps Task tool_use id → trimmed description', (t) => {
+  const dir = makeTmpDir(t);
+  const p = path.join(dir, 'main.jsonl');
+  const lines = [
+    { type: 'user', message: { content: 'hi' } },
+    {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'launching' },
+          { type: 'tool_use', name: 'Task', id: 'toolu_1', input: { description: '  Explore analytics plugin  ', subagent_type: 'Explore' } },
+          { type: 'tool_use', name: 'Read', id: 'toolu_2', input: { file_path: '/x' } },
+        ],
+      },
+    },
+  ];
+  fs.writeFileSync(p, lines.map((l) => JSON.stringify(l)).join('\n'), 'utf-8');
+
+  const map = buildTaskDescriptionMap(p);
+  assert.equal(map.get('toolu_1'), 'Explore analytics plugin', 'Task description trimmed + mapped by id');
+  assert.equal(map.has('toolu_2'), false, 'non-Task tool_use ignored');
+});
+
+test('buildTaskDescriptionMap — unreadable/empty transcript yields empty map', (t) => {
+  const dir = makeTmpDir(t);
+  assert.equal(buildTaskDescriptionMap(path.join(dir, 'missing.jsonl')).size, 0);
 });

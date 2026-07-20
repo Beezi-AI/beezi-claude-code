@@ -18,6 +18,25 @@ export function detectBillingSource(env = process.env) {
   return BillingSource.SUBSCRIPTION;
 }
 
+// The specific third-party provider vocabulary shared with the Beezi API.
+export const ThirdPartyProvider = Object.freeze({
+  AWS_BEDROCK: 'aws_bedrock',
+  GOOGLE_VERTEX: 'google_vertex',
+  AZURE_FOUNDRY: 'azure_foundry',
+  GATEWAY: 'gateway',
+});
+
+// Which third-party provider is in use, from the environment. Presence-only — the value of each
+// var is never read. Precedence matches detectBillingSource: cloud providers before gateway vars.
+// Returns null when billing is not third-party (no provider env is set).
+export function detectThirdPartyProvider(env = process.env) {
+  if (env.CLAUDE_CODE_USE_BEDROCK) return ThirdPartyProvider.AWS_BEDROCK;
+  if (env.CLAUDE_CODE_USE_VERTEX) return ThirdPartyProvider.GOOGLE_VERTEX;
+  if (env.CLAUDE_CODE_USE_FOUNDRY) return ThirdPartyProvider.AZURE_FOUNDRY;
+  if (env.ANTHROPIC_BASE_URL || env.ANTHROPIC_AUTH_TOKEN) return ThirdPartyProvider.GATEWAY;
+  return null;
+}
+
 // Normalize the local credential fields to a plan label. rateLimitTier wins for the
 // Max multiplier; subscriptionType names the product. Substring match so new
 // default_claude_max_* tiers degrade gracefully. Raw fields remain the source of truth.

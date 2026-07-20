@@ -11,10 +11,10 @@ import { postJson } from './http.mjs';
 import { postSessionError } from './session-error-report.mjs';
 import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { detectBillingSource } from './billing.mjs';
-import { readBillingConfig, subscriptionReportFields } from './billing-config.mjs';
+import { readBillingConfig, subscriptionReportFields, thirdPartyReportFields } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
-import { listSubagentTranscripts } from './subagents.mjs';
+import { listSubagentTranscripts, buildTaskDescriptionMap } from './subagents.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 
 function loadState(id) {
@@ -63,6 +63,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // Below the token gate: skip this work entirely on an unlinked machine.
   const billingSource = detectBillingSource();
   const subscriptionFields = subscriptionReportFields(billingSource, readBillingConfig());
+  const thirdPartyFields = thirdPartyReportFields(billingSource);
   const resolvedSessionName = resolveSessionName(session_id, transcript_path);
 
   // Memoized git shell-outs for this checkpoint: dir→root, root→remote, root→reflog/HEAD.
@@ -139,6 +140,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           to_line: seg.toLine,
           billing_source: billingSource,
           ...subscriptionFields,
+          ...thirdPartyFields,
           session_name: sessionName,
           ...(timezone ? { timezone } : {}),
           ...(extra || {}),
@@ -158,7 +160,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // collide with main-transcript segments (or each other) on the server upsert.
   const agentCursors = state.agentCursors ?? {};
   let agentCursorsDirty = false;
-  for (const { agentId, path: agentPath, agentType, spawnDepth } of listSubagentTranscripts(transcript_path, session_id)) {
+  // Each subagent's display name is the `description` of the Task block that spawned it; join via
+  // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
+  const taskDescriptions = buildTaskDescriptionMap(transcript_path);
+  for (const { agentId, path: agentPath, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
     const agentFrom = agentCursors[agentId] ?? 0;
     let agentDelta;
     try {
@@ -168,6 +173,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       is_subagent: true,
       agent_id: agentId,
       agent_type: agentType,
+      agent_name: toolUseId ? (taskDescriptions.get(toolUseId) ?? null) : null,
       spawn_depth: spawnDepth,
     });
     if (agentDelta.nextCursor !== agentFrom) {

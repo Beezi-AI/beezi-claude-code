@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectBillingSource } from '../lib/billing.mjs';
+import { detectBillingSource, detectThirdPartyProvider } from '../lib/billing.mjs';
 import { normalizePlan } from '../lib/billing.mjs';
+import { thirdPartyReportFields } from '../lib/billing-config.mjs';
 
 test('detectBillingSource — third_party when ANTHROPIC_BASE_URL is set', () => {
   assert.equal(detectBillingSource({ ANTHROPIC_BASE_URL: 'https://proxy.example' }), 'third_party');
@@ -55,4 +56,37 @@ test('normalizePlan — falls back to subscriptionType', () => {
 test('normalizePlan — unknown when nothing matches', () => {
   assert.equal(normalizePlan(undefined, undefined), 'unknown');
   assert.equal(normalizePlan('mystery', 'mystery'), 'unknown');
+});
+
+test('detectThirdPartyProvider — names each cloud provider from its env', () => {
+  assert.equal(detectThirdPartyProvider({ CLAUDE_CODE_USE_BEDROCK: '1' }), 'aws_bedrock');
+  assert.equal(detectThirdPartyProvider({ CLAUDE_CODE_USE_VERTEX: '1' }), 'google_vertex');
+  assert.equal(detectThirdPartyProvider({ CLAUDE_CODE_USE_FOUNDRY: '1' }), 'azure_foundry');
+});
+
+test('detectThirdPartyProvider — gateway for base-url / auth-token', () => {
+  assert.equal(detectThirdPartyProvider({ ANTHROPIC_BASE_URL: 'https://proxy.example' }), 'gateway');
+  assert.equal(detectThirdPartyProvider({ ANTHROPIC_AUTH_TOKEN: 'tok' }), 'gateway');
+});
+
+test('detectThirdPartyProvider — cloud provider wins over gateway vars', () => {
+  assert.equal(
+    detectThirdPartyProvider({ CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_BASE_URL: 'https://proxy' }),
+    'aws_bedrock',
+  );
+});
+
+test('detectThirdPartyProvider — null when no provider env is set', () => {
+  assert.equal(detectThirdPartyProvider({}), null);
+  assert.equal(detectThirdPartyProvider({ ANTHROPIC_API_KEY: 'sk-x' }), null);
+});
+
+test('thirdPartyReportFields — provider key only for third-party billing', () => {
+  assert.deepEqual(
+    thirdPartyReportFields('third_party', { CLAUDE_CODE_USE_BEDROCK: '1' }),
+    { third_party_provider: 'aws_bedrock' },
+  );
+  assert.deepEqual(thirdPartyReportFields('subscription', { CLAUDE_CODE_USE_BEDROCK: '1' }), {});
+  // third-party billing with no identifiable provider env → omit the key rather than send unknown.
+  assert.deepEqual(thirdPartyReportFields('third_party', {}), {});
 });
