@@ -5,6 +5,7 @@ import { apiBase, ENDPOINTS } from '../lib/config.mjs';
 import { getToken, setToken } from '../lib/credentials.mjs';
 import { beeziHome } from '../lib/paths.mjs';
 import { whoami } from '../lib/whoami.mjs';
+import { friendlyMessage, UserError } from '../lib/friendly-error.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -74,7 +75,7 @@ async function runStart() {
 
   const startRes = await fetch(`${base}${ENDPOINTS.deviceStart}`, { method: 'POST' });
   if (!startRes.ok) {
-    throw new Error(`Could not start device login (HTTP ${startRes.status}). Check BEEZI_API_URL.`);
+    throw new UserError(`Could not start device login (HTTP ${startRes.status}). Check BEEZI_API_URL.`);
   }
   const start = await startRes.json();
 
@@ -118,7 +119,7 @@ async function runWait() {
   for (;;) {
     if (Date.now() > pending.deadline) {
       removePending();
-      throw new Error('Login timed out before approval. Run /beezi:login again.');
+      throw new UserError('Login timed out before approval. Run /beezi:login again.');
     }
     await sleep(waitMs);
     waitMs = intervalMs;
@@ -134,7 +135,7 @@ async function runWait() {
     if (!res.ok) {
       const detail = await pollErrorDetail(res);
       removePending();
-      throw new Error(`Device authorization failed (HTTP ${res.status}${detail ? `: ${detail}` : ''}).`);
+      throw new UserError(`Device authorization failed (HTTP ${res.status}${detail ? `: ${detail}` : ''}).`);
     }
 
     const { token } = await res.json();
@@ -148,6 +149,6 @@ async function runWait() {
 const command = process.argv[2] ?? 'start';
 
 (command === 'wait' ? runWait() : runStart()).catch((error) => {
-  console.error(`\n✗ ${error.message}`);
+  console.error(`\n✗ ${friendlyMessage(error)}`);
   process.exit(1);
 });

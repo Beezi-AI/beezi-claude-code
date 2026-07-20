@@ -1,5 +1,6 @@
 import { getToken } from '../lib/credentials.mjs';
 import { whoami } from '../lib/whoami.mjs';
+import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 function formatLastSeen(iso) {
   if (!iso) return 'no sessions yet';
@@ -35,6 +36,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`\n✗ ${error.message}`);
+  console.error(`\n✗ ${friendlyMessage(error)}`);
   process.exit(1);
 });

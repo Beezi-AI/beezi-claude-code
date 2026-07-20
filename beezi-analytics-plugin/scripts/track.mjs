@@ -2,6 +2,7 @@ import { getToken } from '../lib/credentials.mjs';
 import { runCheckpoint } from '../lib/checkpoint.mjs';
 import { git, resolveOriginRemote, currentBranch, taskFromBranch } from '../lib/git.mjs';
 import { resolveSessionTranscript } from '../lib/transcript.mjs';
+import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 const cwd = process.cwd();
 
@@ -57,4 +58,4 @@ async function main() {
   console.log(`✓ Beezi: analytics saved for ${label} (${saved} segment${saved === 1 ? '' : 's'}).`);
 }
 
-main().catch((error) => fail(error.message));
+main().catch((error) => fail(friendlyMessage(error)));

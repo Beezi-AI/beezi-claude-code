@@ -1,4 +1,5 @@
 import { BillingSource, detectBillingSource, normalizePlan } from './billing.mjs';
+import { UserError } from './friendly-error.mjs';
 
 // The credential fields are short opaque labels. Anything token-shaped (an
 // sk-ant secret, an over-long string, or embedded whitespace) is refused so a
@@ -10,7 +11,7 @@ function safeField(value) {
   const s = String(value).trim();
   if (!s) return null;
   if (s.length > 64 || TOKEN_LIKE.test(s)) {
-    throw new Error('Refusing a suspicious value (looks token-like). Nothing written.');
+    throw new UserError('Refusing a suspicious value (looks token-like). Nothing written.');
   }
   return s;
 }
@@ -29,7 +30,7 @@ export function parseArgs(argv) {
   // The script's --from-claude branch rebuilds args from ~/.claude.json, which would
   // silently drop a user-supplied --plan; refuse the combination up front instead.
   if (out.fromClaude && out.plan != null) {
-    throw new Error('--plan and --from-claude are mutually exclusive.');
+    throw new UserError('--plan and --from-claude are mutually exclusive.');
   }
   return out;
 }
@@ -42,7 +43,7 @@ export function buildConfig(args, env = process.env, now = new Date()) {
   if (args.plan != null) {
     const plan = String(args.plan).trim().toLowerCase();
     if (!SELF_REPORTED_PLANS.includes(plan)) {
-      throw new Error(`Unknown plan '${args.plan}'. Valid: ${SELF_REPORTED_PLANS.join(', ')}.`);
+      throw new UserError(`Unknown plan '${args.plan}'. Valid: ${SELF_REPORTED_PLANS.join(', ')}.`);
     }
     const source = detectBillingSource(env);
     const isSub = source === BillingSource.SUBSCRIPTION;
