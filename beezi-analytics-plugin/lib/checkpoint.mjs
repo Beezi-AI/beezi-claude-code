@@ -35,6 +35,17 @@ function enqueue(payload) {
   writeJsonSecure(path.join(queueDir(), filename), payload);
 }
 
+// The machine's IANA timezone (e.g. Europe/Kyiv). Snapshotted per checkpoint so the server can
+// bucket this session's activity in the user's local time even if they later travel. Null when
+// the runtime can't resolve one — the field is then omitted from the payload.
+function detectTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // `deps` holds substitutable implementations (test seams); `options` holds caller-driven execution
 // modes. Keeping them separate stops a behavior flag from masquerading as an injectable.
 // Returns { enqueued, flush } — flush is the flushQueue summary (or null when it never ran).
@@ -110,6 +121,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let enqueued = 0;
   // The last enqueued payload becomes the "anchor" we can replay to push a later rename.
   let lastPayload = null;
+  const timezone = detectTimezone();
   const enqueueSegments = (segs, segmentScope, extra = null) => {
     for (const seg of segs) {
       if (seg.stats.token_total === 0 && seg.stats.duration_sec === 0) continue;
@@ -128,6 +140,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           billing_source: billingSource,
           ...subscriptionFields,
           session_name: sessionName,
+          ...(timezone ? { timezone } : {}),
           ...(extra || {}),
           ...seg.stats,
         };

@@ -770,6 +770,35 @@ test('per-category operations reach the enqueued payload', async (t) => {
   assert.equal(operations.other.count, 0);
 });
 
+// ─── timezone: the machine's IANA zone rides every enqueued payload ──────────
+
+test('payload carries the machine IANA timezone', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    {
+      type: 'assistant',
+      gitBranch: 'main',
+      timestamp: '2026-07-08T10:00:00.000Z',
+      message: {
+        model: 'model-a',
+        usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: 'text', text: 'hi' }],
+      },
+    },
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-tz', transcript_path: transcript, cwd: dir },
+    { getToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  const items = readQueue(dir);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].payload.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+});
+
 // ─── session rename after first prompt is re-sent via the anchor segment ──────
 
 function userLine(branch, text, timestamp) {
